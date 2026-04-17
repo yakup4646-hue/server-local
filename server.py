@@ -25,12 +25,29 @@ IV = b'dYQ9R99bkKLsLHad'
 LICENSE_SECRET = (hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()[:32]
                   if SERVER_LICENSE_SECRET else
                   hashlib.sha256(b"ROLLER_VIP_SERVER_ONLY_SECRET_2026").digest()[:32])
+pending_commands = []
 client_pending_commands = []
+last_bot_status = {
+    "updated_at": "",
+    "is_running": False,
+    "is_paused": False,
+    "is_playing": False,
+    "pending_end_request": False,
+    "current_game": None,
+    "current_level": None,
+    "status_text": "Hazır",
+    "total_loaded_games": 0,
+    "ready_games_count": 0,
+    "total_played_games": 0,
+    "total_power": 0,
+    "instant_power": 0,
+    "remaining_seconds": 0
+}
 REMOTE_STATE_KEYS = {
     str(USERS_FILE): 'users',
     str(LICENSES_FILE): 'licenses',
     str(NOTICE_FILE): 'notice',
-    str(BOT_FILE): 'bot'
+    str(BOT_FILE): 'bot',
 }
 
 
@@ -133,6 +150,37 @@ def decrypt_license_for_server(token: str):
         return json.loads(plaintext)
     except Exception:
         return None
+
+
+def patch_bot_content(content: str):
+    server_url = request.host_url.rstrip('/')
+    content = re.sub(r"const\s+PY_URL\s*=\s*['\"]http://127\.0\.0\.1:\d+['\"]\s*;", f"const PY_URL = '{server_url}';", content)
+    content = content.replace('__SERVER_URL__', server_url)
+    content = content.replace('http://127.0.0.1:5003', server_url)
+    content = content.replace('http://127.0.0.1:5005', server_url)
+    return content
+
+
+def generate_key(user_id):
+    user_id = str(user_id).strip()
+    t = list(user_id)
+    a = [int(c) for c in t if c.isdigit()]
+    s = sum(a)
+    n = sorted(a)
+    slice_t = t[:len(n)]
+    i = [str(x) for x in n] + slice_t + [str(s)]
+    oe_result = ''.join(i)
+    md5_hash = hashlib.md5(oe_result.encode()).hexdigest()
+    return (md5_hash + md5_hash).encode()[:32]
+
+
+def encrypt_with_uid(data, uid):
+    key = generate_key(uid)
+    plaintext = json.dumps(data) if isinstance(data, dict) else str(data)
+    padded = pad(plaintext.encode('utf-8'), AES.block_size)
+    cipher = AES.new(key, AES.MODE_CBC, IV)
+    encrypted = cipher.encrypt(padded)
+    return base64.b64encode(encrypted).decode('utf-8')
 
 
 def encrypt_bot_for_uid(bot_code: str, uid: str):
@@ -264,6 +312,8 @@ def api_auth():
     bot_code = load_json(BOT_FILE, '')
     if not isinstance(bot_code, str):
         bot_code = BOT_FILE.read_text(encoding='utf-8', errors='ignore') if BOT_FILE.exists() else ''
+    if bot_code:
+        bot_code = patch_bot_content(bot_code)
     payload = {
         'success': True,
         'session_token': session_token,
@@ -350,6 +400,118 @@ def api_client_command():
         return jsonify({'success': False, 'error': 'Gecersiz oturum'})
     command = client_pending_commands.pop(0) if client_pending_commands else None
     return jsonify({'success': True, 'command': command})
+
+
+@app.route('/games', methods=['GET'])
+def api_games():
+    return jsonify({})
+
+
+@app.route('/user_id', methods=['GET'])
+def api_user_id_get():
+    users = load_json(USERS_FILE, {})
+    latest_uid = ''
+    latest_time = ''
+    for uid, row in users.items():
+        tm = str(row.get('last_login') or '')
+        if tm >= latest_time:
+            latest_time = tm
+            latest_uid = uid
+    return jsonify({'success': True, 'user_id': latest_uid})
+
+
+@app.route('/user_id', methods=['POST'])
+def api_user_id_set():
+    data = request.get_json() or {}
+    uid = str(data.get('user_id') or data.get('uid') or '').strip().lower()
+    if not uid or not re.match(r'^[a-f0-9]{24}$', uid, re.IGNORECASE):
+        return jsonify({'success': False, 'message': 'Geçerli user id bulunamadı'})
+    users = load_json(USERS_FILE, {})
+    users.setdefault(uid, {'uid': uid, 'name': data.get('source', 'script'), 'created': datetime.now().isoformat(), 'sessions': []})
+    save_json(USERS_FILE, users)
+    return jsonify({'success': True, 'user_id': uid, 'message': 'Aktif user id güncellendi'})
+
+
+@app.route('/encrypt', methods=['POST'])
+def api_encrypt():
+    try:
+        data = request.get_json() or {}
+        uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+        if not uid:
+            return jsonify({'success': False, 'error': 'uid gerekli'})
+        payload = {
+            'power': int(data['power']),
+            'time': int(data['time']),
+            'user_game_id': str(data['user_game_id']),
+            'win_status': int(data.get('win_status', 3))
+        }
+        encrypted = encrypt_with_uid(payload, uid)
+        return jsonify({'success': True, 'encrypted': encrypted, 'user_id': uid})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/notify', methods=['POST'])
+def api_notify():
+    data = request.get_json() or {}
+    log_event(f"Notify: {json.dumps(data, ensure_ascii=False)[:500]}")
+    return jsonify({'success': True, 'received': data})
+
+
+@app.route('/bot/status', methods=['POST'])
+def api_bot_status():
+    global last_bot_status
+    try:
+        data = request.get_json() or {}
+        last_bot_status = {
+            'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'is_running': bool(data.get('is_running', False)),
+            'is_paused': bool(data.get('is_paused', False)),
+            'is_playing': bool(data.get('is_playing', False)),
+            'pending_end_request': bool(data.get('pending_end_request', False)),
+            'current_game': data.get('current_game') or data.get('current_game_name') or data.get('playing_game'),
+            'current_level': data.get('current_level'),
+            'status_text': str(data.get('status_text') or 'Hazır'),
+            'total_loaded_games': int(data.get('total_loaded_games', 0) or 0),
+            'ready_games_count': int(data.get('ready_games_count', 0) or 0),
+            'total_played_games': int(data.get('total_played_games', 0) or 0),
+            'total_power': int(data.get('total_power', 0) or 0),
+            'instant_power': int(data.get('instant_power', data.get('current_power', 0)) or 0),
+            'remaining_seconds': int(data.get('remaining_seconds', data.get('time_left', data.get('remaining_time', 0))) or 0)
+        }
+        return jsonify({'success': True, 'status': last_bot_status})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/bot/status', methods=['GET'])
+def api_bot_status_get():
+    return jsonify({'success': True, 'status': last_bot_status})
+
+
+@app.route('/bot/command', methods=['GET'])
+def api_bot_command_get():
+    command = pending_commands.pop(0) if pending_commands else None
+    return jsonify({'success': True, 'command': command})
+
+
+@app.route('/bot/command', methods=['POST'])
+def api_bot_command_post():
+    data = request.get_json() or {}
+    command = str(data.get('command') or '').strip().lower()
+    if command not in {'start','stop','reset','refresh','full_clean','status','menu','games','reset_stats'}:
+        return jsonify({'success': False, 'message': 'Geçersiz komut'})
+    pending_commands.append({
+        'command': 'reset' if command == 'refresh' else command,
+        'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'source': 'manual'
+    })
+    return jsonify({'success': True, 'command': command, 'status': last_bot_status})
+
+
+@app.route('/bot/command/ack', methods=['POST'])
+def api_bot_command_ack():
+    return jsonify({'success': True})
 
 
 @app.route('/api/notice/next', methods=['POST'])
@@ -501,9 +663,24 @@ def admin_bot_set():
     content = str(data.get('content') or '')
     if not content:
         return jsonify({'success': False, 'error': 'Bot icerigi bos'})
+    content = re.sub(r"const\s+PY_URL\s*=\s*['\"]http://127\.0\.0\.1:\d+['\"]\s*;", "const PY_URL = '__SERVER_URL__';", content)
+    content = content.replace('http://127.0.0.1:5003', '__SERVER_URL__')
+    content = content.replace('http://127.0.0.1:5005', '__SERVER_URL__')
     save_json(BOT_FILE, content)
     BOT_FILE.write_text(content, encoding='utf-8')
     log_event('Admin bot guncelledi')
+    return jsonify({'success': True})
+
+
+@app.route('/admin/bot-command', methods=['POST'])
+def admin_bot_command():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    command = str(data.get('command') or '').strip().lower()
+    if not command:
+        return jsonify({'success': False, 'error': 'Komut bos'})
+    pending_commands.append({'command': command, 'time': datetime.now().isoformat(), 'source': 'admin'})
     return jsonify({'success': True})
 
 
