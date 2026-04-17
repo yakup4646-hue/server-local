@@ -835,7 +835,6 @@ def admin_licenses():
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     licenses = load_json(LICENSES_FILE, {})
     now = datetime.now()
-    changed = False
     for lid, row in licenses.items():
         hb = str(row.get('last_heartbeat') or '').strip()
         is_online = False
@@ -845,13 +844,7 @@ def admin_licenses():
             except Exception:
                 is_online = False
         row['runtime_online'] = is_online
-        if not is_online and row.get('uid'):
-            row['last_uid'] = row.get('uid')
-            row['uid'] = ''
-            changed = True
         licenses[lid] = row
-    if changed:
-        save_json(LICENSES_FILE, licenses)
     return jsonify({'success': True, 'licenses': licenses})
 
 
