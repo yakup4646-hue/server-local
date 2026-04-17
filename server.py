@@ -290,6 +290,17 @@ def format_remaining_time(seconds):
     return f'{mins}dk {secs:02d}sn'
 
 
+def is_license_online(row, now=None):
+    now = now or datetime.now()
+    hb = str((row or {}).get('last_heartbeat') or '').strip()
+    if not hb:
+        return False
+    try:
+        return (now - datetime.fromisoformat(hb)).total_seconds() <= 90
+    except Exception:
+        return False
+
+
 def get_license_status_text(_license_row=None):
     st = last_bot_status or {}
     return (
@@ -835,17 +846,14 @@ def admin_licenses():
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     licenses = load_json(LICENSES_FILE, {})
     now = datetime.now()
+    result = {}
     for lid, row in licenses.items():
-        hb = str(row.get('last_heartbeat') or '').strip()
-        is_online = False
-        if hb:
-            try:
-                is_online = (now - datetime.fromisoformat(hb)).total_seconds() <= 90
-            except Exception:
-                is_online = False
-        row['runtime_online'] = is_online
-        licenses[lid] = row
-    return jsonify({'success': True, 'licenses': licenses})
+        row_copy = dict(row or {})
+        is_online = is_license_online(row_copy, now)
+        row_copy['runtime_online'] = is_online
+        row_copy['display_uid'] = str(row_copy.get('uid') or '').strip() if is_online else ''
+        result[lid] = row_copy
+    return jsonify({'success': True, 'licenses': result})
 
 
 @app.route('/admin/users', methods=['GET'])
