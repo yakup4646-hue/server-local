@@ -15,7 +15,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
     HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
-    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE
+    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE
 )
 
 app = Flask(__name__)
@@ -48,6 +48,7 @@ REMOTE_STATE_KEYS = {
     str(LICENSES_FILE): 'licenses',
     str(NOTICE_FILE): 'notice',
     str(BOT_FILE): 'bot',
+    str(GAMES_FILE): 'games',
 }
 
 
@@ -404,7 +405,7 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
-    return jsonify({})
+    return jsonify(load_json(GAMES_FILE, {}))
 
 
 @app.route('/user_id', methods=['GET'])
@@ -672,6 +673,26 @@ def admin_bot_set():
     return jsonify({'success': True})
 
 
+@app.route('/admin/games', methods=['GET'])
+def admin_games_get():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    return jsonify({'success': True, 'games': load_json(GAMES_FILE, {})})
+
+
+@app.route('/admin/games', methods=['POST'])
+def admin_games_set():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    games = data.get('games') or {}
+    if not isinstance(games, dict):
+        return jsonify({'success': False, 'error': 'Gecersiz games verisi'})
+    save_json(GAMES_FILE, games)
+    log_event(f'Admin games guncelledi: {len(games)} oyun')
+    return jsonify({'success': True, 'count': len(games)})
+
+
 @app.route('/admin/bot-command', methods=['POST'])
 def admin_bot_command():
     if not check_admin(request):
@@ -705,18 +726,21 @@ def admin_sync_all():
     users = data.get('users') or {}
     notice = data.get('notice')
     bot_content = data.get('bot_content')
+    games = data.get('games') or {}
 
     if not isinstance(licenses, dict) or not isinstance(users, dict):
         return jsonify({'success': False, 'error': 'Gecersiz sync verisi'})
 
     save_json(LICENSES_FILE, licenses)
     save_json(USERS_FILE, users)
+    save_json(GAMES_FILE, games if isinstance(games, dict) else {})
     if isinstance(notice, dict):
         save_json(NOTICE_FILE, notice)
     if isinstance(bot_content, str) and bot_content.strip():
+        save_json(BOT_FILE, bot_content)
         BOT_FILE.write_text(bot_content, encoding='utf-8')
 
-    log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'}")
+    log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} games={len(games) if isinstance(games, dict) else 0} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'}")
     return jsonify({'success': True, 'licenses_count': len(licenses), 'users_count': len(users)})
 
 

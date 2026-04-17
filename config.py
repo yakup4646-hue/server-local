@@ -18,6 +18,7 @@ LICENSES_FILE = DATA_DIR / 'licenses.json'
 NOTICE_FILE = DATA_DIR / 'notice.json'
 LOGS_FILE = DATA_DIR / 'server_logs.txt'
 BOT_FILE = DATA_DIR / 'bot.txt'
+GAMES_FILE = DATA_DIR / 'games.json'
 
 for p, default in [
     (USERS_FILE, '{}'),
@@ -25,6 +26,7 @@ for p, default in [
     (NOTICE_FILE, '{"id":"","text":"","created_at":""}'),
     (LOGS_FILE, ''),
     (BOT_FILE, ''),
+    (GAMES_FILE, '{}'),
 ]:
     if not p.exists():
         p.write_text(default, encoding='utf-8')
