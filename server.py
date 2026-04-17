@@ -723,6 +723,22 @@ def api_encrypt():
         return jsonify({'success': False, 'error': str(e)})
 
 
+@app.route('/encrypt_start', methods=['POST'])
+def api_encrypt_start():
+    try:
+        data = request.get_json() or {}
+        uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+        start_data = data.get('start_data')
+        if not uid:
+            return jsonify({'success': False, 'error': 'uid gerekli'})
+        if start_data in (None, ''):
+            return jsonify({'success': False, 'error': 'start_data gerekli'})
+        encrypted = encrypt_with_uid(start_data, uid)
+        return jsonify({'success': True, 'encrypted': encrypted, 'user_id': uid})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
 @app.route('/notify', methods=['POST'])
 def api_notify():
     data = request.get_json() or {}
