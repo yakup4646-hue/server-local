@@ -495,7 +495,7 @@ def api_auth():
         row['uid'] = uid
     elif bound_uid != uid:
         if not allow_uid_change:
-            return jsonify({'success': False, 'error': 'Script gecersiz: sabit uid aktif'})
+            return jsonify({'success': False, 'error': 'Script gecersiz'})
         row['old_uid'] = bound_uid
         row['uid'] = uid
         row['rebind_at'] = datetime.now().isoformat()
@@ -618,6 +618,11 @@ def api_client_command():
     user = users.get(uid)
     if not user or not valid_session(user, token):
         return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'Script gecersiz'})
     command = client_pending_commands.pop(0) if client_pending_commands else None
     return jsonify({'success': True, 'command': command})
 
@@ -776,6 +781,8 @@ def api_telegram_screenshot():
     licenses = load_json(LICENSES_FILE, {})
     license_id = user.get('license_id')
     row = licenses.get(license_id or '') or {}
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'Script gecersiz'})
     tg_token = str(row.get('telegram_token') or '').strip()
     tg_chat = str(row.get('telegram_chat_id') or '').strip()
     if not tg_token or not tg_chat:
@@ -807,6 +814,8 @@ def api_notice_next():
     licenses = load_json(LICENSES_FILE, {})
     license_id = user.get('license_id')
     row = licenses.get(license_id or '') or {}
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'Script gecersiz'})
 
     personal = (row.get('personal_notice') or user.get('personal_notice') or {})
     if personal.get('id') and personal.get('text'):
