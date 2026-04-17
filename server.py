@@ -3,16 +3,28 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
+import base64
+import hashlib
+import secrets
+import re
 from datetime import datetime
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad, unpad
 from config import (
-    HOST, PORT, ADMIN_TOKEN, ALLOWED_ORIGINS,
+    HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, ALLOWED_ORIGINS,
     USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE
 )
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS or "*"}})
+
+IV = b'dYQ9R99bkKLsLHad'
+LICENSE_SECRET = (hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()[:32]
+                  if SERVER_LICENSE_SECRET else
+                  hashlib.sha256(b"ROLLER_VIP_SERVER_ONLY_SECRET_2026").digest()[:32])
+client_pending_commands = []
 
 
 def load_json(path, default):
@@ -36,13 +48,61 @@ def check_admin(req):
     return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
 
 
+def normalize_lang(lang):
+    lang = str(lang or 'tr').strip().lower()
+    return {'tr': 'tr', 'en': 'en', 'pr': 'pr', 'pt': 'pr'}.get(lang, 'tr')
+
+
+def client_hash_text(text: str):
+    h = 0
+    for ch in str(text):
+        h = ((h << 5) - h) + ord(ch)
+        h &= 0xffffffff
+    signed = h if h < 0x80000000 else h - 0x100000000
+    return 'h' + format(abs(signed), 'x')
+
+
+def decrypt_license_for_server(token: str):
+    try:
+        raw = base64.urlsafe_b64decode(str(token).encode('utf-8'))
+        cipher = AES.new(LICENSE_SECRET, AES.MODE_CBC, IV)
+        plaintext = unpad(cipher.decrypt(raw), AES.block_size).decode('utf-8')
+        return json.loads(plaintext)
+    except Exception:
+        return None
+
+
+def encrypt_bot_for_uid(bot_code: str, uid: str):
+    key_bytes = (uid.encode('utf-8') * 128)
+    src = bot_code.encode('utf-8')
+    xored = bytes(b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(src))
+    return base64.b64encode(xored).decode('utf-8')
+
+
+def send_telegram_api(token, method, payload):
+    token = str(token or '').strip()
+    if not token:
+        return False, {'error': 'telegram token bos'}
+    try:
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        body = json.dumps(payload).encode('utf-8')
+        req = urlrequest.Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+        with urlrequest.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        return bool(data.get('ok')), data
+    except (HTTPError, URLError) as e:
+        return False, {'error': str(e)}
+    except Exception as e:
+        return False, {'error': str(e)}
+
+
+def valid_session(user, token):
+    return any(str(s.get('token') or '').strip() == token for s in (user.get('sessions') or []))
+
+
 @app.route('/')
 def index():
-    return jsonify({
-        'success': True,
-        'service': 'server-local-online-api',
-        'status': 'ok'
-    })
+    return jsonify({'success': True, 'service': 'server-local-online-api', 'status': 'ok'})
 
 
 @app.route('/api/health')
@@ -50,16 +110,194 @@ def api_health():
     return jsonify({'success': True, 'time': datetime.now().isoformat()})
 
 
+@app.route('/api/auth', methods=['POST'])
+def api_auth():
+    data = request.get_json() or {}
+    uid = str(data.get('uid') or '').strip().lower()
+    license_key = str(data.get('license_key') or '').strip()
+    name = str(data.get('name') or 'Kullanici').strip() or 'Kullanici'
+    language = normalize_lang(data.get('language', 'tr'))
+    fingerprint = str(data.get('fingerprint') or '').strip()
+    incoming_client_id = str(data.get('client_id') or '').strip()
+    incoming_hash = str(data.get('script_hash') or '').strip()
+
+    if not uid or not license_key:
+        return jsonify({'success': False, 'error': 'Eksik bilgi'})
+    if not re.match(r'^[a-f0-9]{24}$', uid, re.IGNORECASE):
+        return jsonify({'success': False, 'error': 'Gecersiz UID'})
+
+    decrypted = decrypt_license_for_server(license_key)
+    if not decrypted:
+        return jsonify({'success': False, 'error': 'Lisans gecersiz'})
+
+    license_id = str(decrypted.get('license_id') or '').strip()
+    client_name = str(decrypted.get('client_name') or name).strip() or name
+    client_id = str(decrypted.get('client_id') or incoming_client_id).strip()
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans kaydi yok'})
+
+    licenses = load_json(LICENSES_FILE, {})
+    if license_id not in licenses:
+        licenses[license_id] = {
+            'license_id': license_id,
+            'client_name': client_name,
+            'client_id': client_id,
+            'issued_at': str(decrypted.get('issued_at') or datetime.now().isoformat()),
+            'uid': None,
+            'active': True,
+            'status': 'active',
+            'script_hash': client_hash_text(client_name + '|' + client_id),
+            'last_heartbeat': None,
+            'encrypted_license': license_key,
+            'telegram_token': '',
+            'telegram_chat_id': ''
+        }
+
+    row = licenses[license_id]
+    if not row.get('active', True):
+        return jsonify({'success': False, 'error': 'Lisans pasif'})
+
+    if client_id and row.get('client_id') and client_id != row.get('client_id'):
+        return jsonify({'success': False, 'error': 'Script kimligi uyusmuyor'})
+
+    expected_hash = str(row.get('script_hash') or '').strip()
+    if expected_hash and incoming_hash and incoming_hash != expected_hash:
+        return jsonify({'success': False, 'error': 'Script dogrulamasi basarisiz'})
+
+    bound_uid = str(row.get('uid') or '').strip().lower()
+    if not bound_uid:
+        row['uid'] = uid
+    elif bound_uid != uid:
+        row['old_uid'] = bound_uid
+        row['uid'] = uid
+        row['rebind_at'] = datetime.now().isoformat()
+
+    session_token = secrets.token_hex(16)
+    users = load_json(USERS_FILE, {})
+    if uid not in users:
+        users[uid] = {
+            'uid': uid,
+            'name': client_name,
+            'license_id': license_id,
+            'fingerprint': fingerprint,
+            'created': datetime.now().isoformat(),
+            'sessions': [],
+            'seen_notice_ids': []
+        }
+    users[uid]['last_login'] = datetime.now().isoformat()
+    users[uid]['license_id'] = license_id
+    users[uid]['language'] = language
+    users[uid].setdefault('sessions', []).append({
+        'token': session_token,
+        'fingerprint': fingerprint,
+        'time': datetime.now().isoformat()
+    })
+
+    row['language'] = language
+    row['last_login'] = datetime.now().isoformat()
+    save_json(USERS_FILE, users)
+    save_json(LICENSES_FILE, licenses)
+
+    bot_code = BOT_FILE.read_text(encoding='utf-8', errors='ignore') if BOT_FILE.exists() else ''
+    payload = {
+        'success': True,
+        'session_token': session_token,
+        'uid': uid,
+        'language': language,
+    }
+    if bot_code:
+        payload['bot_code'] = encrypt_bot_for_uid(bot_code, uid)
+    log_event(f'Auth ok: {uid[:8]}... -> {license_id}')
+    return jsonify(payload)
+
+
+@app.route('/api/heartbeat', methods=['POST'])
+def api_heartbeat():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    incoming_client_id = str(data.get('client_id') or '').strip()
+    incoming_hash = str(data.get('script_hash') or '').strip()
+    if not token or not uid:
+        return jsonify({'success': False, 'error': 'Eksik heartbeat'})
+
+    users = load_json(USERS_FILE, {})
+    licenses = load_json(LICENSES_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'off'})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '')
+    if not row or not row.get('active', True):
+        return jsonify({'success': False, 'error': 'off'})
+    if row.get('client_id') and incoming_client_id and incoming_client_id != row.get('client_id'):
+        return jsonify({'success': False, 'error': 'off'})
+    if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
+        return jsonify({'success': False, 'error': 'off'})
+    row['last_heartbeat'] = datetime.now().isoformat()
+    licenses[license_id] = row
+    save_json(LICENSES_FILE, licenses)
+    return jsonify({'success': True})
+
+
+@app.route('/api/telegram/register', methods=['POST'])
+def api_telegram_register():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    telegram_token = str(data.get('telegram_token') or '').strip()
+    telegram_chat_id = str(data.get('telegram_chat_id') or '').strip()
+    if not token or not uid or not telegram_token or not telegram_chat_id:
+        return jsonify({'success': False, 'error': 'Eksik Telegram bilgisi'})
+
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '')
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+
+    ok, resp = send_telegram_api(telegram_token, 'getMe', {})
+    if not ok:
+        return jsonify({'success': False, 'error': 'Telegram bot token gecersiz', 'detail': resp})
+
+    row['telegram_token'] = telegram_token
+    row['telegram_chat_id'] = telegram_chat_id
+    row['telegram_connected_at'] = datetime.now().isoformat()
+    licenses[license_id] = row
+    save_json(LICENSES_FILE, licenses)
+    return jsonify({'success': True, 'bot': resp.get('result', {})})
+
+
+@app.route('/api/client/command', methods=['POST'])
+def api_client_command():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    if not token or not uid:
+        return jsonify({'success': False, 'error': 'Eksik bilgi'})
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    command = client_pending_commands.pop(0) if client_pending_commands else None
+    return jsonify({'success': True, 'command': command})
+
+
 @app.route('/api/notice/next', methods=['POST'])
 def api_notice_next():
     data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
     uid = str(data.get('uid') or '').strip().lower()
-    if not uid:
+    if not token or not uid:
         return jsonify({'success': False, 'error': 'Eksik uid'})
     users = load_json(USERS_FILE, {})
     user = users.get(uid)
-    if not user:
-        return jsonify({'success': True, 'notice': None})
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     if not notice.get('id') or not notice.get('text'):
         return jsonify({'success': True, 'notice': None})
@@ -79,6 +317,93 @@ def admin_licenses():
     return jsonify({'success': True, 'licenses': load_json(LICENSES_FILE, {})})
 
 
+@app.route('/admin/users', methods=['GET'])
+def admin_users():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    return jsonify({'success': True, 'users': load_json(USERS_FILE, {})})
+
+
+@app.route('/admin/license/create', methods=['POST'])
+def admin_license_create():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    license_id = str(data.get('license_id') or '').strip()
+    client_name = str(data.get('client_name') or 'Kullanici').strip() or 'Kullanici'
+    client_id = str(data.get('client_id') or '').strip()
+    encrypted_license = str(data.get('encrypted_license') or '').strip()
+    script_hash = str(data.get('script_hash') or '').strip()
+    script_file = str(data.get('script_file') or '').strip()
+    if not license_id or not client_id or not encrypted_license:
+        return jsonify({'success': False, 'error': 'Eksik lisans bilgisi'})
+    licenses = load_json(LICENSES_FILE, {})
+    licenses[license_id] = {
+        'license_id': license_id,
+        'client_name': client_name,
+        'client_id': client_id,
+        'issued_at': datetime.now().isoformat(),
+        'uid': None,
+        'active': True,
+        'status': 'active',
+        'script_hash': script_hash or client_hash_text(client_name + '|' + client_id),
+        'last_heartbeat': None,
+        'script_file': script_file,
+        'encrypted_license': encrypted_license,
+        'suspicious_reason': '',
+        'telegram_token': '',
+        'telegram_chat_id': ''
+    }
+    save_json(LICENSES_FILE, licenses)
+    log_event(f'Admin lisans olusturdu: {license_id}')
+    return jsonify({'success': True, 'license': licenses[license_id]})
+
+
+@app.route('/admin/license/state', methods=['POST'])
+def admin_license_state():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    license_id = str(data.get('license_id') or '').strip()
+    active = bool(data.get('active', True))
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans yok'})
+    licenses = load_json(LICENSES_FILE, {})
+    row = licenses.get(license_id)
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+    row['active'] = active
+    row['status'] = 'active' if active else 'inactive'
+    if active:
+        row['suspicious_reason'] = ''
+    licenses[license_id] = row
+    save_json(LICENSES_FILE, licenses)
+    log_event(f'Admin lisans durum degistirdi: {license_id} -> {active}')
+    return jsonify({'success': True, 'license': row})
+
+
+@app.route('/admin/license/delete', methods=['POST'])
+def admin_license_delete():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    license_id = str(data.get('license_id') or '').strip()
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans yok'})
+    licenses = load_json(LICENSES_FILE, {})
+    row = licenses.pop(license_id, None)
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+    bound_uid = str(row.get('uid') or '').strip().lower()
+    users = load_json(USERS_FILE, {})
+    if bound_uid and bound_uid in users:
+        users.pop(bound_uid, None)
+        save_json(USERS_FILE, users)
+    save_json(LICENSES_FILE, licenses)
+    log_event(f'Admin lisans sildi: {license_id}')
+    return jsonify({'success': True})
+
+
 @app.route('/admin/notice', methods=['POST'])
 def admin_notice():
     if not check_admin(request):
@@ -87,11 +412,7 @@ def admin_notice():
     text = str(data.get('text') or '').strip()
     if not text:
         return jsonify({'success': False, 'error': 'Mesaj bos'})
-    notice = {
-        'id': datetime.now().strftime('%Y%m%d%H%M%S'),
-        'text': text,
-        'created_at': datetime.now().isoformat()
-    }
+    notice = {'id': datetime.now().strftime('%Y%m%d%H%M%S'), 'text': text, 'created_at': datetime.now().isoformat()}
     save_json(NOTICE_FILE, notice)
     log_event('Admin notice guncellendi')
     return jsonify({'success': True, 'notice': notice})
@@ -114,6 +435,18 @@ def admin_bot_set():
         return jsonify({'success': False, 'error': 'Bot icerigi bos'})
     BOT_FILE.write_text(content, encoding='utf-8')
     log_event('Admin bot guncelledi')
+    return jsonify({'success': True})
+
+
+@app.route('/admin/client-command', methods=['POST'])
+def admin_client_command():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    command = str(data.get('command') or '').strip()
+    if not command:
+        return jsonify({'success': False, 'error': 'Komut bos'})
+    client_pending_commands.append({'command': command, 'time': datetime.now().isoformat(), 'source': 'admin'})
     return jsonify({'success': True})
 
 
