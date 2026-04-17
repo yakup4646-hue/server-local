@@ -10,10 +10,11 @@ import re
 from datetime import datetime
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
+from urllib.parse import quote
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
-    HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, ALLOWED_ORIGINS,
+    HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
     USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE
 )
 
@@ -25,9 +26,68 @@ LICENSE_SECRET = (hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()
                   if SERVER_LICENSE_SECRET else
                   hashlib.sha256(b"ROLLER_VIP_SERVER_ONLY_SECRET_2026").digest()[:32])
 client_pending_commands = []
+REMOTE_STATE_KEYS = {
+    str(USERS_FILE): 'users',
+    str(LICENSES_FILE): 'licenses',
+    str(NOTICE_FILE): 'notice',
+    str(BOT_FILE): 'bot'
+}
+
+
+def _supabase_enabled():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+
+
+def _supabase_headers():
+    return {
+        'apikey': SUPABASE_SERVICE_KEY,
+        'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
+        'Content-Type': 'application/json'
+    }
+
+
+def _supabase_get_state(state_key, default):
+    if not _supabase_enabled():
+        return default
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/app_state?key=eq.{quote(state_key)}&select=value"
+        req = urlrequest.Request(url, headers=_supabase_headers(), method='GET')
+        with urlrequest.urlopen(req, timeout=20) as resp:
+            rows = json.loads(resp.read().decode('utf-8'))
+        if rows and isinstance(rows, list):
+            return rows[0].get('value', default)
+    except Exception as e:
+        log_event(f'Supabase load error ({state_key}): {e}')
+    return default
+
+
+def _supabase_set_state(state_key, value):
+    if not _supabase_enabled():
+        return False
+    try:
+        body = json.dumps({
+            'key': state_key,
+            'value': value,
+            'updated_at': datetime.now().isoformat()
+        }).encode('utf-8')
+        headers = _supabase_headers()
+        headers['Prefer'] = 'resolution=merge-duplicates'
+        url = f"{SUPABASE_URL}/rest/v1/app_state?on_conflict=key"
+        req = urlrequest.Request(url, data=body, headers=headers, method='POST')
+        with urlrequest.urlopen(req, timeout=20) as resp:
+            resp.read()
+        return True
+    except Exception as e:
+        log_event(f'Supabase save error ({state_key}): {e}')
+        return False
 
 
 def load_json(path, default):
+    state_key = REMOTE_STATE_KEYS.get(str(path))
+    if state_key:
+        remote = _supabase_get_state(state_key, None)
+        if remote is not None:
+            return remote
     try:
         return json.loads(path.read_text(encoding='utf-8'))
     except Exception:
@@ -35,6 +95,9 @@ def load_json(path, default):
 
 
 def save_json(path, data):
+    state_key = REMOTE_STATE_KEYS.get(str(path))
+    if state_key:
+        _supabase_set_state(state_key, data)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
@@ -198,7 +261,9 @@ def api_auth():
     save_json(USERS_FILE, users)
     save_json(LICENSES_FILE, licenses)
 
-    bot_code = BOT_FILE.read_text(encoding='utf-8', errors='ignore') if BOT_FILE.exists() else ''
+    bot_code = load_json(BOT_FILE, '')
+    if not isinstance(bot_code, str):
+        bot_code = BOT_FILE.read_text(encoding='utf-8', errors='ignore') if BOT_FILE.exists() else ''
     payload = {
         'success': True,
         'session_token': session_token,
@@ -422,7 +487,10 @@ def admin_notice():
 def admin_bot_get():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
-    return jsonify({'success': True, 'bot_size': len(BOT_FILE.read_text(encoding='utf-8', errors='ignore'))})
+    bot_content = load_json(BOT_FILE, '') if _supabase_enabled() else BOT_FILE.read_text(encoding='utf-8', errors='ignore')
+    if isinstance(bot_content, dict):
+        bot_content = ''
+    return jsonify({'success': True, 'bot_size': len(str(bot_content or ''))})
 
 
 @app.route('/admin/bot', methods=['POST'])
@@ -433,6 +501,7 @@ def admin_bot_set():
     content = str(data.get('content') or '')
     if not content:
         return jsonify({'success': False, 'error': 'Bot icerigi bos'})
+    save_json(BOT_FILE, content)
     BOT_FILE.write_text(content, encoding='utf-8')
     log_event('Admin bot guncelledi')
     return jsonify({'success': True})
@@ -448,6 +517,30 @@ def admin_client_command():
         return jsonify({'success': False, 'error': 'Komut bos'})
     client_pending_commands.append({'command': command, 'time': datetime.now().isoformat(), 'source': 'admin'})
     return jsonify({'success': True})
+
+
+@app.route('/admin/sync-all', methods=['POST'])
+def admin_sync_all():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    licenses = data.get('licenses') or {}
+    users = data.get('users') or {}
+    notice = data.get('notice')
+    bot_content = data.get('bot_content')
+
+    if not isinstance(licenses, dict) or not isinstance(users, dict):
+        return jsonify({'success': False, 'error': 'Gecersiz sync verisi'})
+
+    save_json(LICENSES_FILE, licenses)
+    save_json(USERS_FILE, users)
+    if isinstance(notice, dict):
+        save_json(NOTICE_FILE, notice)
+    if isinstance(bot_content, str) and bot_content.strip():
+        BOT_FILE.write_text(bot_content, encoding='utf-8')
+
+    log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'}")
+    return jsonify({'success': True, 'licenses_count': len(licenses), 'users_count': len(users)})
 
 
 if __name__ == '__main__':
