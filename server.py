@@ -253,11 +253,9 @@ def send_telegram_photo(token, chat_id, photo_bytes, caption=''):
 def build_license_telegram_menu(_license_id=None):
     return {
         'keyboard': [
-            ['📊 Durum Bildirimi', '🎮 Bot Durumu'],
+            ['🎮 Bot Durumu'],
             ['▶️ Başlat', '⏹️ Durdur'],
-            ['🧹 İstatistik Sıfırla'],
-            ['🎯 Kazanma Modu Aç', '💥 Kayıp Modu Aç'],
-            ['🎚️ Oran Ayarla 1-100']
+            ['🧹 İstatistik Sıfırla']
         ],
         'resize_keyboard': True,
         'one_time_keyboard': False,
@@ -275,14 +273,6 @@ def build_license_menu_text(action=None, extra=None):
         return '🔄 Sayfa yenile komutu gonderildi.'
     if action == 'reset_stats':
         return '🧹 Istatistik sifirlama komutu gonderildi.'
-    if action == 'win_mode':
-        return '🎯 Kazanma modu acildi.'
-    if action == 'lose_mode':
-        return '💥 Kayip modu acildi.'
-    if action == 'ratio':
-        return f'🎚️ Oran guncellendi: %{extra or 60}'
-    if action == 'menu_toggle':
-        return '📂 Menu ac/kapat komutu gonderildi.'
     return '🎮 Roller VIP kontrol menusu\n\nAlt menuden islem sec.'
 
 
@@ -361,16 +351,6 @@ def process_telegram_action(license_row, action):
     if action == 'reset_stats':
         queue_bot_command('reset_stats')
         return _send_license_reply(license_row, build_license_menu_text('reset_stats'), True)
-    if action == 'win_mode':
-        queue_bot_command('win_mode')
-        return _send_license_reply(license_row, build_license_menu_text('win_mode'), True)
-    if action == 'lose_mode':
-        queue_bot_command('lose_mode')
-        return _send_license_reply(license_row, build_license_menu_text('lose_mode'), True)
-    if action.startswith('ratio:'):
-        ratio = max(1, min(100, int(action.split(':', 1)[1] or '60')))
-        queue_bot_command(f'ratio:{ratio}')
-        return _send_license_reply(license_row, build_license_menu_text('ratio', ratio), True)
     return _send_license_reply(license_row, build_license_menu_text(), True)
 
 
@@ -402,7 +382,7 @@ def poll_all_telegram_bots():
                     text = str(msg.get('text') or '').strip().lower()
                     if text in {'/start', '/menu', 'menu'}:
                         process_telegram_action(row, 'menu')
-                    elif text in {'/durum', 'durum', 'status', '/status', '📊 durum bildirimi', '🎮 bot durumu'}:
+                    elif text in {'/durum', 'durum', 'status', '/status', '🎮 bot durumu'}:
                         process_telegram_action(row, 'status')
                     elif text in {'▶️ başlat', '▶️ baslat'}:
                         process_telegram_action(row, 'start')
@@ -410,14 +390,6 @@ def poll_all_telegram_bots():
                         process_telegram_action(row, 'stop')
                     elif text in {'🧹 i̇statistik sıfırla', '🧹 istatistik sıfırla', '🧹 istatistik sifirla'}:
                         process_telegram_action(row, 'reset_stats')
-                    elif text in {'🎯 kazanma modu aç', '🎯 kazanma modu ac'}:
-                        process_telegram_action(row, 'win_mode')
-                    elif text in {'💥 kayıp modu aç', '💥 kayip modu ac'}:
-                        process_telegram_action(row, 'lose_mode')
-                    elif text.startswith('/oran '):
-                        process_telegram_action(row, 'ratio:' + text.split(' ', 1)[1].strip())
-                    elif text.startswith('oran '):
-                        process_telegram_action(row, 'ratio:' + text.split(' ', 1)[1].strip())
             if changed:
                 log_event('Telegram polling aktif')
         except Exception as e:
@@ -506,15 +478,16 @@ def api_auth():
         return jsonify({'success': False, 'error': 'Script dogrulamasi basarisiz'})
 
     bound_uid = str(row.get('uid') or '').strip().lower()
+    users = load_json(USERS_FILE, {})
     if not bound_uid:
         row['uid'] = uid
     elif bound_uid != uid:
         row['old_uid'] = bound_uid
         row['uid'] = uid
         row['rebind_at'] = datetime.now().isoformat()
+        users.pop(bound_uid, None)
 
     session_token = secrets.token_hex(16)
-    users = load_json(USERS_FILE, {})
     if uid not in users:
         users[uid] = {
             'uid': uid,
@@ -575,6 +548,8 @@ def api_heartbeat():
     row = licenses.get(license_id or '')
     if not row or not row.get('active', True):
         return jsonify({'success': False, 'error': 'off'})
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'invalid uid'})
     if row.get('client_id') and incoming_client_id and incoming_client_id != row.get('client_id'):
         return jsonify({'success': False, 'error': 'off'})
     if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
@@ -858,7 +833,26 @@ def api_notice_next():
 def admin_licenses():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
-    return jsonify({'success': True, 'licenses': load_json(LICENSES_FILE, {})})
+    licenses = load_json(LICENSES_FILE, {})
+    now = datetime.now()
+    changed = False
+    for lid, row in licenses.items():
+        hb = str(row.get('last_heartbeat') or '').strip()
+        is_online = False
+        if hb:
+            try:
+                is_online = (now - datetime.fromisoformat(hb)).total_seconds() <= 90
+            except Exception:
+                is_online = False
+        row['runtime_online'] = is_online
+        if not is_online and row.get('uid'):
+            row['last_uid'] = row.get('uid')
+            row['uid'] = ''
+            changed = True
+        licenses[lid] = row
+    if changed:
+        save_json(LICENSES_FILE, licenses)
+    return jsonify({'success': True, 'licenses': licenses})
 
 
 @app.route('/admin/users', methods=['GET'])
