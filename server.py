@@ -212,6 +212,18 @@ def valid_session(user, token):
     return any(str(s.get('token') or '').strip() == token for s in (user.get('sessions') or []))
 
 
+def get_latest_uid(users=None):
+    users = users or load_json(USERS_FILE, {})
+    latest_uid = ''
+    latest_time = ''
+    for uid, row in users.items():
+        tm = str(row.get('last_login') or row.get('created') or '')
+        if tm >= latest_time:
+            latest_time = tm
+            latest_uid = uid
+    return latest_uid
+
+
 @app.route('/')
 def index():
     return jsonify({'success': True, 'service': 'server-local-online-api', 'status': 'ok'})
@@ -411,14 +423,7 @@ def api_games():
 @app.route('/user_id', methods=['GET'])
 def api_user_id_get():
     users = load_json(USERS_FILE, {})
-    latest_uid = ''
-    latest_time = ''
-    for uid, row in users.items():
-        tm = str(row.get('last_login') or '')
-        if tm >= latest_time:
-            latest_time = tm
-            latest_uid = uid
-    return jsonify({'success': True, 'user_id': latest_uid})
+    return jsonify({'success': True, 'user_id': get_latest_uid(users)})
 
 
 @app.route('/user_id', methods=['POST'])
@@ -438,6 +443,8 @@ def api_encrypt():
     try:
         data = request.get_json() or {}
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+        if not uid:
+            uid = get_latest_uid()
         if not uid:
             return jsonify({'success': False, 'error': 'uid gerekli'})
         payload = {
