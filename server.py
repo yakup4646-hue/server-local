@@ -17,7 +17,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
     HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
-    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE, REVOKED_LICENSES_FILE
+    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE, REVOKED_LICENSES_FILE, QUICK_LINKS_FILE
 )
 
 app = Flask(__name__)
@@ -53,6 +53,7 @@ REMOTE_STATE_KEYS = {
     str(BOT_FILE): 'bot',
     str(GAMES_FILE): 'games',
     str(REVOKED_LICENSES_FILE): 'revoked_licenses',
+    str(QUICK_LINKS_FILE): 'quick_links',
 }
 
 
@@ -181,6 +182,27 @@ def is_revoked_license(license_id='', encrypted_license='', client_id='', script
         if script_hash and str(item.get('script_hash') or '').strip() == script_hash:
             return True
     return False
+
+
+def load_quick_links():
+    data = load_json(QUICK_LINKS_FILE, {'active': False, 'telegram': '', 'youtube': '', 'login': ''})
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        'active': bool(data.get('active', False)),
+        'telegram': str(data.get('telegram') or '').strip(),
+        'youtube': str(data.get('youtube') or '').strip(),
+        'login': str(data.get('login') or '').strip(),
+    }
+
+
+def save_quick_links(data):
+    save_json(QUICK_LINKS_FILE, {
+        'active': bool((data or {}).get('active', False)),
+        'telegram': str((data or {}).get('telegram') or '').strip(),
+        'youtube': str((data or {}).get('youtube') or '').strip(),
+        'login': str((data or {}).get('login') or '').strip(),
+    })
 
 
 def patch_bot_content(content: str):
@@ -617,6 +639,7 @@ def api_auth():
         'session_token': session_token,
         'uid': uid,
         'language': language,
+        'quick_links': load_quick_links(),
     }
     if bot_code:
         payload['bot_code'] = encrypt_bot_for_uid(bot_code, uid)
@@ -927,7 +950,9 @@ def api_notice_next():
                 licenses[license_id]['message_text'] = personal.get('text', '')
                 licenses[license_id]['message_id'] = personal.get('id', '')
                 save_json(LICENSES_FILE, licenses)
-            return jsonify({'success': True, 'notice': personal})
+            personal_with_links = dict(personal)
+            personal_with_links['links'] = load_quick_links()
+            return jsonify({'success': True, 'notice': personal_with_links})
 
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     if not notice.get('id') or not notice.get('text'):
@@ -946,7 +971,9 @@ def api_notice_next():
         save_json(LICENSES_FILE, licenses)
     users[uid] = user
     save_json(USERS_FILE, users)
-    return jsonify({'success': True, 'notice': notice})
+    notice_with_links = dict(notice)
+    notice_with_links['links'] = load_quick_links()
+    return jsonify({'success': True, 'notice': notice_with_links})
 
 
 @app.route('/admin/licenses', methods=['GET'])
@@ -1224,6 +1251,7 @@ def admin_sync_all():
     notice = data.get('notice')
     bot_content = data.get('bot_content')
     games = data.get('games') or {}
+    quick_links = data.get('quick_links') or {}
 
     if not isinstance(licenses, dict) or not isinstance(users, dict):
         return jsonify({'success': False, 'error': 'Gecersiz sync verisi'})
@@ -1231,6 +1259,8 @@ def admin_sync_all():
     save_json(LICENSES_FILE, licenses)
     save_json(USERS_FILE, users)
     save_json(GAMES_FILE, normalize_games_map(games if isinstance(games, dict) else {}))
+    if isinstance(quick_links, dict):
+        save_quick_links(quick_links)
     if isinstance(notice, dict):
         save_json(NOTICE_FILE, notice)
     if isinstance(bot_content, str) and bot_content.strip():
