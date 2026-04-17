@@ -761,6 +761,7 @@ def api_notice_next():
         seen_personal = user.get('seen_personal_notice_ids', []) or []
         if personal['id'] not in seen_personal:
             user.setdefault('seen_personal_notice_ids', []).append(personal['id'])
+            user['personal_notice'] = {}
             users[uid] = user
             save_json(USERS_FILE, users)
             return jsonify({'success': True, 'notice': personal})
@@ -774,6 +775,9 @@ def api_notice_next():
     user.setdefault('seen_notice_ids', []).append(notice['id'])
     users[uid] = user
     save_json(USERS_FILE, users)
+    notice_state = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
+    if notice_state.get('id') == notice['id']:
+        save_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     return jsonify({'success': True, 'notice': notice})
 
 
