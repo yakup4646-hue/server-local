@@ -253,7 +253,6 @@ def send_telegram_photo(token, chat_id, photo_bytes, caption=''):
 def build_license_telegram_menu(_license_id=None):
     return {
         'keyboard': [
-            ['📂 Menü Aç / Kapat'],
             ['📊 Durum Bildirimi', '🎮 Bot Durumu'],
             ['▶️ Başlat', '⏹️ Durdur'],
             ['🧹 İstatistik Sıfırla'],
@@ -346,9 +345,8 @@ def queue_client_command(command):
 
 def process_telegram_action(license_row, action):
     action = str(action or '').strip().lower()
-    if action in {'menu', 'open_menu', 'menu_toggle'}:
-        queue_client_command('toggle_menu')
-        return _send_license_reply(license_row, build_license_menu_text('menu_toggle'), True)
+    if action in {'menu', 'open_menu'}:
+        return _send_license_reply(license_row, build_license_menu_text(), True)
     if action in {'status', 'bot_status'}:
         return _send_license_reply(license_row, get_license_status_text(license_row), True)
     if action == 'start':
@@ -402,8 +400,8 @@ def poll_all_telegram_bots():
                     if incoming_chat != chat_id:
                         continue
                     text = str(msg.get('text') or '').strip().lower()
-                    if text in {'/start', '/menu', 'menu', '📂 menü aç / kapat', '📂 menu ac / kapat'}:
-                        process_telegram_action(row, 'menu_toggle')
+                    if text in {'/start', '/menu', 'menu'}:
+                        process_telegram_action(row, 'menu')
                     elif text in {'/durum', 'durum', 'status', '/status', '📊 durum bildirimi', '🎮 bot durumu'}:
                         process_telegram_action(row, 'status')
                     elif text in {'▶️ başlat', '▶️ baslat'}:
@@ -760,6 +758,8 @@ def api_notice_ack():
     user.setdefault('seen_personal_notice_ids', [])
     if notice_id not in user['seen_personal_notice_ids']:
         user['seen_personal_notice_ids'].append(notice_id)
+    user['delivered_notice_ids'] = [x for x in (user.get('delivered_notice_ids') or []) if x != notice_id]
+    user['delivered_personal_notice_ids'] = [x for x in (user.get('delivered_personal_notice_ids') or []) if x != notice_id]
     user['personal_notice'] = {}
     users[uid] = user
     save_json(USERS_FILE, users)
@@ -822,7 +822,11 @@ def api_notice_next():
     personal = (row.get('personal_notice') or user.get('personal_notice') or {})
     if personal.get('id') and personal.get('text'):
         seen_personal = user.get('seen_personal_notice_ids', []) or []
-        if personal['id'] not in seen_personal:
+        delivered_personal = user.get('delivered_personal_notice_ids', []) or []
+        if personal['id'] not in seen_personal and personal['id'] not in delivered_personal:
+            user.setdefault('delivered_personal_notice_ids', []).append(personal['id'])
+            users[uid] = user
+            save_json(USERS_FILE, users)
             if license_id in licenses:
                 licenses[license_id]['message_status'] = 'Gonderildi'
                 licenses[license_id]['message_text'] = personal.get('text', '')
@@ -834,8 +838,10 @@ def api_notice_next():
     if not notice.get('id') or not notice.get('text'):
         return jsonify({'success': True, 'notice': None})
     seen = user.get('seen_notice_ids', []) or []
-    if notice['id'] in seen:
+    delivered = user.get('delivered_notice_ids', []) or []
+    if notice['id'] in seen or notice['id'] in delivered:
         return jsonify({'success': True, 'notice': None})
+    user.setdefault('delivered_notice_ids', []).append(notice['id'])
     licenses = load_json(LICENSES_FILE, {})
     license_id = user.get('license_id')
     if license_id in licenses:
