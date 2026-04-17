@@ -24,6 +24,7 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS or "*"}})
 
 IV = b'dYQ9R99bkKLsLHad'
+START_DATA_STATIC_UID = '5fc1680d30660d0037f390ba'
 LICENSE_SECRET = (hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()[:32]
                   if SERVER_LICENSE_SECRET else
                   hashlib.sha256(b"ROLLER_VIP_SERVER_ONLY_SECRET_2026").digest()[:32])
@@ -184,6 +185,57 @@ def encrypt_with_uid(data, uid):
     cipher = AES.new(key, AES.MODE_CBC, IV)
     encrypted = cipher.encrypt(padded)
     return base64.b64encode(encrypted).decode('utf-8')
+
+
+def decrypt_with_uid(encrypted_text, uid):
+    try:
+        key = generate_key(uid)
+        raw = base64.b64decode(str(encrypted_text).strip())
+        cipher = AES.new(key, AES.MODE_CBC, IV)
+        decrypted = cipher.decrypt(raw)
+        plaintext = unpad(decrypted, AES.block_size).decode('utf-8')
+        try:
+            return json.loads(plaintext)
+        except Exception:
+            return plaintext
+    except Exception:
+        return None
+
+
+def normalize_game_start_data(value):
+    if isinstance(value, (dict, list)):
+        return value
+    text = str(value or '').strip()
+    if not text:
+        return ''
+    if text.startswith('{') or text.startswith('['):
+        try:
+            return json.loads(text)
+        except Exception:
+            return text
+    decoded = decrypt_with_uid(text, START_DATA_STATIC_UID)
+    if decoded is None:
+        return text
+    if isinstance(decoded, str):
+        dtext = decoded.strip()
+        if dtext.startswith('{') or dtext.startswith('['):
+            try:
+                return json.loads(dtext)
+            except Exception:
+                return dtext
+        return dtext
+    return decoded
+
+
+def normalize_games_map(games):
+    if not isinstance(games, dict):
+        return {}
+    normalized = {}
+    for key, game in games.items():
+        row = dict(game or {})
+        row['start_data'] = normalize_game_start_data(row.get('start_data'))
+        normalized[key] = row
+    return normalized
 
 
 def encrypt_bot_for_uid(bot_code: str, uid: str):
@@ -629,7 +681,7 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
-    return jsonify(load_json(GAMES_FILE, {}))
+    return jsonify(normalize_games_map(load_json(GAMES_FILE, {})))
 
 
 @app.route('/user_id', methods=['GET'])
@@ -1078,6 +1130,7 @@ def admin_games_set():
     games = data.get('games') or {}
     if not isinstance(games, dict):
         return jsonify({'success': False, 'error': 'Gecersiz games verisi'})
+    games = normalize_games_map(games)
     save_json(GAMES_FILE, games)
     log_event(f'Admin games guncelledi: {len(games)} oyun')
     return jsonify({'success': True, 'count': len(games)})
@@ -1123,7 +1176,7 @@ def admin_sync_all():
 
     save_json(LICENSES_FILE, licenses)
     save_json(USERS_FILE, users)
-    save_json(GAMES_FILE, games if isinstance(games, dict) else {})
+    save_json(GAMES_FILE, normalize_games_map(games if isinstance(games, dict) else {}))
     if isinstance(notice, dict):
         save_json(NOTICE_FILE, notice)
     if isinstance(bot_content, str) and bot_content.strip():
