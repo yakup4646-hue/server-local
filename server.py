@@ -490,9 +490,12 @@ def api_auth():
 
     bound_uid = str(row.get('uid') or '').strip().lower()
     users = load_json(USERS_FILE, {})
+    allow_uid_change = bool(row.get('allow_uid_change', True))
     if not bound_uid:
         row['uid'] = uid
     elif bound_uid != uid:
+        if not allow_uid_change:
+            return jsonify({'success': False, 'error': 'Script gecersiz: sabit uid aktif'})
         row['old_uid'] = bound_uid
         row['uid'] = uid
         row['rebind_at'] = datetime.now().isoformat()
@@ -874,6 +877,7 @@ def admin_license_create():
     encrypted_license = str(data.get('encrypted_license') or '').strip()
     script_hash = str(data.get('script_hash') or '').strip()
     script_file = str(data.get('script_file') or '').strip()
+    allow_uid_change = bool(data.get('allow_uid_change', True))
     if not license_id or not client_id or not encrypted_license:
         return jsonify({'success': False, 'error': 'Eksik lisans bilgisi'})
     licenses = load_json(LICENSES_FILE, {})
@@ -885,6 +889,7 @@ def admin_license_create():
         'uid': None,
         'active': True,
         'status': 'active',
+        'allow_uid_change': allow_uid_change,
         'script_hash': script_hash or client_hash_text(client_name + '|' + client_id),
         'last_heartbeat': None,
         'script_file': script_file,
@@ -921,6 +926,26 @@ def admin_license_state():
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
     log_event(f'Admin lisans durum degistirdi: {license_id} -> {active}')
+    return jsonify({'success': True, 'license': row})
+
+
+@app.route('/admin/license/uid-mode', methods=['POST'])
+def admin_license_uid_mode():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    license_id = str(data.get('license_id') or '').strip()
+    allow_uid_change = bool(data.get('allow_uid_change', True))
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans yok'})
+    licenses = load_json(LICENSES_FILE, {})
+    row = licenses.get(license_id)
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+    row['allow_uid_change'] = allow_uid_change
+    licenses[license_id] = row
+    save_json(LICENSES_FILE, licenses)
+    log_event(f'Admin uid modu degisti: {license_id} -> allow_uid_change={allow_uid_change}')
     return jsonify({'success': True, 'license': row})
 
 
