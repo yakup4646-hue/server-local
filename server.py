@@ -7,7 +7,9 @@ import base64
 import hashlib
 import secrets
 import re
+import threading
 from datetime import datetime
+from io import BytesIO
 from urllib import request as urlrequest
 from urllib.error import URLError, HTTPError
 from urllib.parse import quote
@@ -208,6 +210,194 @@ def send_telegram_api(token, method, payload):
         return False, {'error': str(e)}
 
 
+def send_telegram_photo(token, chat_id, photo_bytes, caption=''):
+    token = str(token or '').strip()
+    chat_id = str(chat_id or '').strip()
+    if not token or not chat_id:
+        return False, {'error': 'telegram bilgisi eksik'}
+    boundary = '----RollerVipBoundary' + secrets.token_hex(8)
+    body = BytesIO()
+
+    def _write_field(name, value):
+        body.write(f'--{boundary}\r\n'.encode('utf-8'))
+        body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode('utf-8'))
+        body.write(str(value).encode('utf-8'))
+        body.write(b'\r\n')
+
+    _write_field('chat_id', chat_id)
+    if caption:
+        _write_field('caption', caption)
+    body.write(f'--{boundary}\r\n'.encode('utf-8'))
+    body.write(b'Content-Disposition: form-data; name="photo"; filename="roller_vip.png"\r\n')
+    body.write(b'Content-Type: image/png\r\n\r\n')
+    body.write(photo_bytes)
+    body.write(b'\r\n')
+    body.write(f'--{boundary}--\r\n'.encode('utf-8'))
+
+    try:
+        req = urlrequest.Request(
+            f'https://api.telegram.org/bot{token}/sendPhoto',
+            data=body.getvalue(),
+            headers={'Content-Type': f'multipart/form-data; boundary={boundary}'},
+            method='POST'
+        )
+        with urlrequest.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        return bool(data.get('ok')), data
+    except (HTTPError, URLError) as e:
+        return False, {'error': str(e)}
+    except Exception as e:
+        return False, {'error': str(e)}
+
+
+def build_license_telegram_menu(_license_id=None):
+    return {
+        'keyboard': [
+            ['▶️ Başlat', '⏹️ Durdur'],
+            ['🔄 Sayfa Yenile', '📊 Durum Bildirimi'],
+            ['⚙️ Telegram Değiştir']
+        ],
+        'resize_keyboard': True,
+        'one_time_keyboard': False,
+        'is_persistent': True
+    }
+
+
+def build_license_menu_text(action=None):
+    action = str(action or '').strip().lower()
+    if action == 'start':
+        return '▶️ Baslat komutu gonderildi.'
+    if action == 'stop':
+        return '⏹️ Durdur komutu gonderildi.'
+    if action == 'refresh':
+        return '🔄 Sayfa yenile komutu gonderildi.'
+    if action == 'tg_change':
+        return '⚙️ Telegram degistirme komutu gonderildi.'
+    return '🎮 Roller VIP kontrol menusu\n\nTelegram alt klavyesinden komut sec.'
+
+
+def format_remaining_time(seconds):
+    try:
+        seconds = int(seconds or 0)
+    except Exception:
+        seconds = 0
+    if seconds < 0:
+        seconds = 0
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f'{hours}s {mins:02d}dk {secs:02d}sn'
+    return f'{mins}dk {secs:02d}sn'
+
+
+def get_license_status_text(_license_row=None):
+    st = last_bot_status or {}
+    return (
+        f"📊 Durum Bildirimi\n\n"
+        f"Hazir oyun sayisi: {st.get('ready_games_count', 0)}\n"
+        f"Oynanan oyun: {st.get('current_game') or '-'}\n"
+        f"Kalan sure: {format_remaining_time(st.get('remaining_seconds', 0))}\n"
+        f"Anlik power: {st.get('instant_power', 0)}\n"
+        f"Toplam power: {st.get('total_power', 0)}"
+    )
+
+
+def _send_license_reply(license_row, text, with_menu=False):
+    payload = {
+        'chat_id': str(license_row.get('telegram_chat_id') or '').strip(),
+        'text': text
+    }
+    if with_menu:
+        payload['reply_markup'] = build_license_telegram_menu(license_row.get('license_id'))
+    return send_telegram_api(license_row.get('telegram_token'), 'sendMessage', payload)
+
+
+def send_license_telegram_menu(license_row):
+    token = str(license_row.get('telegram_token') or '').strip()
+    chat_id = str(license_row.get('telegram_chat_id') or '').strip()
+    if not token or not chat_id:
+        return False, {'error': 'telegram bilgisi eksik'}
+    return send_telegram_api(token, 'sendMessage', {
+        'chat_id': chat_id,
+        'text': build_license_menu_text(),
+        'reply_markup': build_license_telegram_menu(license_row.get('license_id'))
+    })
+
+
+def queue_bot_command(command):
+    pending_commands.append({'command': command, 'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'source': 'telegram'})
+
+
+def queue_client_command(command):
+    client_pending_commands.append({'command': command, 'time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'source': 'telegram'})
+
+
+def process_telegram_action(license_row, action):
+    action = str(action or '').strip().lower()
+    if action in {'menu', 'open_menu'}:
+        return _send_license_reply(license_row, build_license_menu_text(), True)
+    if action == 'status':
+        return _send_license_reply(license_row, get_license_status_text(license_row), True)
+    if action == 'start':
+        queue_bot_command('start')
+        return _send_license_reply(license_row, build_license_menu_text('start'), True)
+    if action == 'stop':
+        queue_bot_command('stop')
+        return _send_license_reply(license_row, build_license_menu_text('stop'), True)
+    if action == 'refresh':
+        queue_client_command('refresh_page')
+        return _send_license_reply(license_row, build_license_menu_text('refresh'), True)
+    if action == 'tg_change':
+        queue_client_command('open_telegram_settings')
+        return _send_license_reply(license_row, build_license_menu_text('tg_change'), True)
+    return _send_license_reply(license_row, build_license_menu_text(), True)
+
+
+def poll_all_telegram_bots():
+    tg_offsets = {}
+    while True:
+        try:
+            licenses = load_json(LICENSES_FILE, {})
+            changed = False
+            for lid, row in licenses.items():
+                token = str(row.get('telegram_token') or '').strip()
+                chat_id = str(row.get('telegram_chat_id') or '').strip()
+                if not token or not chat_id:
+                    continue
+                key = token[-24:]
+                offset = int(tg_offsets.get(key, 0) or 0)
+                ok, data = send_telegram_api(token, 'getUpdates', {'offset': offset, 'timeout': 0, 'allowed_updates': ['message']})
+                if not ok:
+                    continue
+                for upd in data.get('result', []):
+                    update_id = int(upd.get('update_id', 0) or 0)
+                    if update_id >= offset:
+                        tg_offsets[key] = update_id + 1
+                        changed = True
+                    msg = upd.get('message') or {}
+                    incoming_chat = str(((msg.get('chat') or {}).get('id')) or '').strip()
+                    if incoming_chat != chat_id:
+                        continue
+                    text = str(msg.get('text') or '').strip().lower()
+                    if text in {'/start', '/menu', 'menu'}:
+                        process_telegram_action(row, 'menu')
+                    elif text in {'/durum', 'durum', 'status', '/status', '📊 durum bildirimi'}:
+                        process_telegram_action(row, 'status')
+                    elif text in {'▶️ başlat', '▶️ baslat'}:
+                        process_telegram_action(row, 'start')
+                    elif text in {'⏹️ durdur'}:
+                        process_telegram_action(row, 'stop')
+                    elif text in {'🔄 sayfa yenile'}:
+                        process_telegram_action(row, 'refresh')
+                    elif text in {'⚙️ telegram değiştir', '⚙️ telegram degistir'}:
+                        process_telegram_action(row, 'tg_change')
+            if changed:
+                log_event('Telegram polling aktif')
+        except Exception as e:
+            log_event(f'Telegram polling error: {e}')
+        threading.Event().wait(5)
+
+
 def valid_session(user, token):
     return any(str(s.get('token') or '').strip() == token for s in (user.get('sessions') or []))
 
@@ -397,6 +587,7 @@ def api_telegram_register():
     row['telegram_connected_at'] = datetime.now().isoformat()
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
+    send_license_telegram_menu(row)
     return jsonify({'success': True, 'bot': resp.get('result', {})})
 
 
@@ -522,6 +713,37 @@ def api_bot_command_ack():
     return jsonify({'success': True})
 
 
+@app.route('/api/telegram/screenshot', methods=['POST'])
+def api_telegram_screenshot():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    image = str(data.get('image') or '').strip()
+    if not token or not uid or not image:
+        return jsonify({'success': False, 'error': 'Eksik ekran bilgisi'})
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+    tg_token = str(row.get('telegram_token') or '').strip()
+    tg_chat = str(row.get('telegram_chat_id') or '').strip()
+    if not tg_token or not tg_chat:
+        return jsonify({'success': False, 'error': 'Telegram bagli degil'})
+    if ',' in image:
+        image = image.split(',', 1)[1]
+    try:
+        photo_bytes = base64.b64decode(image)
+    except Exception:
+        return jsonify({'success': False, 'error': 'Ekran verisi bozuk'})
+    ok, resp = send_telegram_photo(tg_token, tg_chat, photo_bytes, 'Roller VIP ekran goruntusu')
+    if not ok:
+        return jsonify({'success': False, 'error': 'Telegrama gonderilemedi', 'detail': resp})
+    return jsonify({'success': True})
+
+
 @app.route('/api/notice/next', methods=['POST'])
 def api_notice_next():
     data = request.get_json() or {}
@@ -533,6 +755,16 @@ def api_notice_next():
     user = users.get(uid)
     if not user or not valid_session(user, token):
         return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+
+    personal = user.get('personal_notice') or {}
+    if personal.get('id') and personal.get('text'):
+        seen_personal = user.get('seen_personal_notice_ids', []) or []
+        if personal['id'] not in seen_personal:
+            user.setdefault('seen_personal_notice_ids', []).append(personal['id'])
+            users[uid] = user
+            save_json(USERS_FILE, users)
+            return jsonify({'success': True, 'notice': personal})
+
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     if not notice.get('id') or not notice.get('text'):
         return jsonify({'success': True, 'notice': None})
@@ -653,6 +885,32 @@ def admin_notice():
     return jsonify({'success': True, 'notice': notice})
 
 
+@app.route('/admin/notice/user', methods=['POST'])
+def admin_notice_user():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    uid = str(data.get('uid') or '').strip().lower()
+    text = str(data.get('text') or '').strip()
+    if not uid or not text:
+        return jsonify({'success': False, 'error': 'Uid ve mesaj gerekli'})
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user:
+        return jsonify({'success': False, 'error': 'Kullanici bulunamadi'})
+    notice = {
+        'id': datetime.now().strftime('%Y%m%d%H%M%S') + '_' + secrets.token_hex(3),
+        'text': text,
+        'created_at': datetime.now().isoformat(),
+        'scope': 'personal'
+    }
+    user['personal_notice'] = notice
+    users[uid] = user
+    save_json(USERS_FILE, users)
+    log_event(f'Admin ozel mesaj gonderdi: {uid[:8]}...')
+    return jsonify({'success': True, 'notice': notice})
+
+
 @app.route('/admin/bot', methods=['GET'])
 def admin_bot_get():
     if not check_admin(request):
@@ -753,4 +1011,6 @@ def admin_sync_all():
 
 if __name__ == '__main__':
     log_event('Server basladi')
+    telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
+    telegram_thread.start()
     app.run(host=HOST, port=PORT, debug=False)
