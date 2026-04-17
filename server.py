@@ -253,9 +253,12 @@ def send_telegram_photo(token, chat_id, photo_bytes, caption=''):
 def build_license_telegram_menu(_license_id=None):
     return {
         'keyboard': [
+            ['📂 Menü Aç / Kapat'],
+            ['📊 Durum Bildirimi', '🎮 Bot Durumu'],
             ['▶️ Başlat', '⏹️ Durdur'],
-            ['🔄 Sayfa Yenile', '📊 Durum Bildirimi'],
-            ['⚙️ Telegram Değiştir']
+            ['🧹 İstatistik Sıfırla'],
+            ['🎯 Kazanma Modu Aç', '💥 Kayıp Modu Aç'],
+            ['🎚️ Oran Ayarla 1-100']
         ],
         'resize_keyboard': True,
         'one_time_keyboard': False,
@@ -263,7 +266,7 @@ def build_license_telegram_menu(_license_id=None):
     }
 
 
-def build_license_menu_text(action=None):
+def build_license_menu_text(action=None, extra=None):
     action = str(action or '').strip().lower()
     if action == 'start':
         return '▶️ Baslat komutu gonderildi.'
@@ -271,9 +274,17 @@ def build_license_menu_text(action=None):
         return '⏹️ Durdur komutu gonderildi.'
     if action == 'refresh':
         return '🔄 Sayfa yenile komutu gonderildi.'
-    if action == 'tg_change':
-        return '⚙️ Telegram degistirme komutu gonderildi.'
-    return '🎮 Roller VIP kontrol menusu\n\nTelegram alt klavyesinden komut sec.'
+    if action == 'reset_stats':
+        return '🧹 Istatistik sifirlama komutu gonderildi.'
+    if action == 'win_mode':
+        return '🎯 Kazanma modu acildi.'
+    if action == 'lose_mode':
+        return '💥 Kayip modu acildi.'
+    if action == 'ratio':
+        return f'🎚️ Oran guncellendi: %{extra or 60}'
+    if action == 'menu_toggle':
+        return '📂 Menu ac/kapat komutu gonderildi.'
+    return '🎮 Roller VIP kontrol menusu\n\nAlt menuden islem sec.'
 
 
 def format_remaining_time(seconds):
@@ -295,7 +306,8 @@ def get_license_status_text(_license_row=None):
     return (
         f"📊 Durum Bildirimi\n\n"
         f"Hazir oyun sayisi: {st.get('ready_games_count', 0)}\n"
-        f"Oynanan oyun: {st.get('current_game') or '-'}\n"
+        f"Anlik toplam oynanan: {st.get('total_played_games', 0)}\n"
+        f"Su an oynanan oyun: {st.get('current_game') or '-'}\n"
         f"Kalan sure: {format_remaining_time(st.get('remaining_seconds', 0))}\n"
         f"Anlik power: {st.get('instant_power', 0)}\n"
         f"Toplam power: {st.get('total_power', 0)}"
@@ -334,9 +346,10 @@ def queue_client_command(command):
 
 def process_telegram_action(license_row, action):
     action = str(action or '').strip().lower()
-    if action in {'menu', 'open_menu'}:
-        return _send_license_reply(license_row, build_license_menu_text(), True)
-    if action == 'status':
+    if action in {'menu', 'open_menu', 'menu_toggle'}:
+        queue_client_command('toggle_menu')
+        return _send_license_reply(license_row, build_license_menu_text('menu_toggle'), True)
+    if action in {'status', 'bot_status'}:
         return _send_license_reply(license_row, get_license_status_text(license_row), True)
     if action == 'start':
         queue_bot_command('start')
@@ -347,9 +360,19 @@ def process_telegram_action(license_row, action):
     if action == 'refresh':
         queue_client_command('refresh_page')
         return _send_license_reply(license_row, build_license_menu_text('refresh'), True)
-    if action == 'tg_change':
-        queue_client_command('open_telegram_settings')
-        return _send_license_reply(license_row, build_license_menu_text('tg_change'), True)
+    if action == 'reset_stats':
+        queue_bot_command('reset_stats')
+        return _send_license_reply(license_row, build_license_menu_text('reset_stats'), True)
+    if action == 'win_mode':
+        queue_bot_command('win_mode')
+        return _send_license_reply(license_row, build_license_menu_text('win_mode'), True)
+    if action == 'lose_mode':
+        queue_bot_command('lose_mode')
+        return _send_license_reply(license_row, build_license_menu_text('lose_mode'), True)
+    if action.startswith('ratio:'):
+        ratio = max(1, min(100, int(action.split(':', 1)[1] or '60')))
+        queue_bot_command(f'ratio:{ratio}')
+        return _send_license_reply(license_row, build_license_menu_text('ratio', ratio), True)
     return _send_license_reply(license_row, build_license_menu_text(), True)
 
 
@@ -379,18 +402,24 @@ def poll_all_telegram_bots():
                     if incoming_chat != chat_id:
                         continue
                     text = str(msg.get('text') or '').strip().lower()
-                    if text in {'/start', '/menu', 'menu'}:
-                        process_telegram_action(row, 'menu')
-                    elif text in {'/durum', 'durum', 'status', '/status', '📊 durum bildirimi'}:
+                    if text in {'/start', '/menu', 'menu', '📂 menü aç / kapat', '📂 menu ac / kapat'}:
+                        process_telegram_action(row, 'menu_toggle')
+                    elif text in {'/durum', 'durum', 'status', '/status', '📊 durum bildirimi', '🎮 bot durumu'}:
                         process_telegram_action(row, 'status')
                     elif text in {'▶️ başlat', '▶️ baslat'}:
                         process_telegram_action(row, 'start')
                     elif text in {'⏹️ durdur'}:
                         process_telegram_action(row, 'stop')
-                    elif text in {'🔄 sayfa yenile'}:
-                        process_telegram_action(row, 'refresh')
-                    elif text in {'⚙️ telegram değiştir', '⚙️ telegram degistir'}:
-                        process_telegram_action(row, 'tg_change')
+                    elif text in {'🧹 i̇statistik sıfırla', '🧹 istatistik sıfırla', '🧹 istatistik sifirla'}:
+                        process_telegram_action(row, 'reset_stats')
+                    elif text in {'🎯 kazanma modu aç', '🎯 kazanma modu ac'}:
+                        process_telegram_action(row, 'win_mode')
+                    elif text in {'💥 kayıp modu aç', '💥 kayip modu ac'}:
+                        process_telegram_action(row, 'lose_mode')
+                    elif text.startswith('/oran '):
+                        process_telegram_action(row, 'ratio:' + text.split(' ', 1)[1].strip())
+                    elif text.startswith('oran '):
+                        process_telegram_action(row, 'ratio:' + text.split(' ', 1)[1].strip())
             if changed:
                 log_event('Telegram polling aktif')
         except Exception as e:
@@ -713,6 +742,36 @@ def api_bot_command_ack():
     return jsonify({'success': True})
 
 
+@app.route('/api/notice/ack', methods=['POST'])
+def api_notice_ack():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    notice_id = str(data.get('notice_id') or '').strip()
+    if not token or not uid or not notice_id:
+        return jsonify({'success': False, 'error': 'Eksik ack bilgisi'})
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    user.setdefault('seen_notice_ids', [])
+    if notice_id not in user['seen_notice_ids']:
+        user['seen_notice_ids'].append(notice_id)
+    user.setdefault('seen_personal_notice_ids', [])
+    if notice_id not in user['seen_personal_notice_ids']:
+        user['seen_personal_notice_ids'].append(notice_id)
+    user['personal_notice'] = {}
+    users[uid] = user
+    save_json(USERS_FILE, users)
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    if license_id in licenses and str(licenses[license_id].get('message_id') or '') == notice_id:
+        licenses[license_id]['message_status'] = 'Okundu'
+        licenses[license_id]['personal_notice'] = {}
+        save_json(LICENSES_FILE, licenses)
+    return jsonify({'success': True})
+
+
 @app.route('/api/telegram/screenshot', methods=['POST'])
 def api_telegram_screenshot():
     data = request.get_json() or {}
@@ -756,14 +815,19 @@ def api_notice_next():
     if not user or not valid_session(user, token):
         return jsonify({'success': False, 'error': 'Gecersiz oturum'})
 
-    personal = user.get('personal_notice') or {}
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+
+    personal = (row.get('personal_notice') or user.get('personal_notice') or {})
     if personal.get('id') and personal.get('text'):
         seen_personal = user.get('seen_personal_notice_ids', []) or []
         if personal['id'] not in seen_personal:
-            user.setdefault('seen_personal_notice_ids', []).append(personal['id'])
-            user['personal_notice'] = {}
-            users[uid] = user
-            save_json(USERS_FILE, users)
+            if license_id in licenses:
+                licenses[license_id]['message_status'] = 'Gonderildi'
+                licenses[license_id]['message_text'] = personal.get('text', '')
+                licenses[license_id]['message_id'] = personal.get('id', '')
+                save_json(LICENSES_FILE, licenses)
             return jsonify({'success': True, 'notice': personal})
 
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
@@ -772,12 +836,15 @@ def api_notice_next():
     seen = user.get('seen_notice_ids', []) or []
     if notice['id'] in seen:
         return jsonify({'success': True, 'notice': None})
-    user.setdefault('seen_notice_ids', []).append(notice['id'])
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    if license_id in licenses:
+        licenses[license_id]['message_status'] = 'Gonderildi'
+        licenses[license_id]['message_text'] = notice.get('text', '')
+        licenses[license_id]['message_id'] = notice.get('id', '')
+        save_json(LICENSES_FILE, licenses)
     users[uid] = user
     save_json(USERS_FILE, users)
-    notice_state = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
-    if notice_state.get('id') == notice['id']:
-        save_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     return jsonify({'success': True, 'notice': notice})
 
 
@@ -823,7 +890,10 @@ def admin_license_create():
         'encrypted_license': encrypted_license,
         'suspicious_reason': '',
         'telegram_token': '',
-        'telegram_chat_id': ''
+        'telegram_chat_id': '',
+        'message_text': '',
+        'message_status': '',
+        'message_id': ''
     }
     save_json(LICENSES_FILE, licenses)
     log_event(f'Admin lisans olusturdu: {license_id}')
@@ -885,6 +955,12 @@ def admin_notice():
         return jsonify({'success': False, 'error': 'Mesaj bos'})
     notice = {'id': datetime.now().strftime('%Y%m%d%H%M%S'), 'text': text, 'created_at': datetime.now().isoformat()}
     save_json(NOTICE_FILE, notice)
+    licenses = load_json(LICENSES_FILE, {})
+    for lid in licenses:
+        licenses[lid]['message_text'] = text
+        licenses[lid]['message_status'] = 'Gonderildi'
+        licenses[lid]['message_id'] = notice['id']
+    save_json(LICENSES_FILE, licenses)
     log_event('Admin notice guncellendi')
     return jsonify({'success': True, 'notice': notice})
 
@@ -895,23 +971,33 @@ def admin_notice_user():
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     data = request.get_json() or {}
     uid = str(data.get('uid') or '').strip().lower()
+    license_id = str(data.get('license_id') or '').strip()
     text = str(data.get('text') or '').strip()
-    if not uid or not text:
-        return jsonify({'success': False, 'error': 'Uid ve mesaj gerekli'})
+    if not text or (not uid and not license_id):
+        return jsonify({'success': False, 'error': 'Uid veya lisans ve mesaj gerekli'})
     users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user:
-        return jsonify({'success': False, 'error': 'Kullanici bulunamadi'})
+    licenses = load_json(LICENSES_FILE, {})
+    if not license_id and uid:
+        user = users.get(uid)
+        if not user:
+            return jsonify({'success': False, 'error': 'Kullanici bulunamadi'})
+        license_id = str(user.get('license_id') or '').strip()
+    row = licenses.get(license_id)
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
     notice = {
         'id': datetime.now().strftime('%Y%m%d%H%M%S') + '_' + secrets.token_hex(3),
         'text': text,
         'created_at': datetime.now().isoformat(),
         'scope': 'personal'
     }
-    user['personal_notice'] = notice
-    users[uid] = user
-    save_json(USERS_FILE, users)
-    log_event(f'Admin ozel mesaj gonderdi: {uid[:8]}...')
+    row['personal_notice'] = notice
+    row['message_text'] = text
+    row['message_status'] = 'Gonderildi'
+    row['message_id'] = notice['id']
+    licenses[license_id] = row
+    save_json(LICENSES_FILE, licenses)
+    log_event(f'Admin ozel mesaj gonderdi: {license_id}')
     return jsonify({'success': True, 'notice': notice})
 
 
