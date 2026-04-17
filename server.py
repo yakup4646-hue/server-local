@@ -17,7 +17,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
     HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
-    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE
+    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE, REVOKED_LICENSES_FILE
 )
 
 app = Flask(__name__)
@@ -52,6 +52,7 @@ REMOTE_STATE_KEYS = {
     str(NOTICE_FILE): 'notice',
     str(BOT_FILE): 'bot',
     str(GAMES_FILE): 'games',
+    str(REVOKED_LICENSES_FILE): 'revoked_licenses',
 }
 
 
@@ -154,6 +155,32 @@ def decrypt_license_for_server(token: str):
         return json.loads(plaintext)
     except Exception:
         return None
+
+
+def load_revoked_licenses():
+    data = load_json(REVOKED_LICENSES_FILE, [])
+    return data if isinstance(data, list) else []
+
+
+def save_revoked_licenses(items):
+    save_json(REVOKED_LICENSES_FILE, items if isinstance(items, list) else [])
+
+
+def is_revoked_license(license_id='', encrypted_license='', client_id='', script_hash=''):
+    license_id = str(license_id or '').strip()
+    encrypted_license = str(encrypted_license or '').strip()
+    client_id = str(client_id or '').strip()
+    script_hash = str(script_hash or '').strip()
+    for item in load_revoked_licenses():
+        if license_id and str(item.get('license_id') or '').strip() == license_id:
+            return True
+        if encrypted_license and str(item.get('encrypted_license') or '').strip() == encrypted_license:
+            return True
+        if client_id and str(item.get('client_id') or '').strip() == client_id:
+            return True
+        if script_hash and str(item.get('script_hash') or '').strip() == script_hash:
+            return True
+    return False
 
 
 def patch_bot_content(content: str):
@@ -511,6 +538,8 @@ def api_auth():
     client_id = str(decrypted.get('client_id') or incoming_client_id).strip()
     if not license_id:
         return jsonify({'success': False, 'error': 'Lisans kaydi yok'})
+    if is_revoked_license(license_id, license_key, client_id, incoming_hash):
+        return jsonify({'success': False, 'error': 'Script gecersiz'})
 
     licenses = load_json(LICENSES_FILE, {})
     if license_id not in licenses:
@@ -1038,6 +1067,15 @@ def admin_license_delete():
     row = licenses.pop(license_id, None)
     if not row:
         return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+    revoked = load_revoked_licenses()
+    revoked.append({
+        'license_id': license_id,
+        'encrypted_license': str(row.get('encrypted_license') or '').strip(),
+        'client_id': str(row.get('client_id') or '').strip(),
+        'script_hash': str(row.get('script_hash') or '').strip(),
+        'deleted_at': datetime.now().isoformat()
+    })
+    save_revoked_licenses(revoked)
     bound_uid = str(row.get('uid') or '').strip().lower()
     users = load_json(USERS_FILE, {})
     if bound_uid and bound_uid in users:
