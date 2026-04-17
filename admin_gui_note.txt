@@ -1,0 +1,11 @@
+Mevcut v.py simdilik yonetim paneli olarak kalacak.
+
+Bir sonraki adim:
+- v.py icindeki lisans/bot/notice islemlerini online API'ye baglamak
+- Flask server kodunu tamamen server.py tarafina tasimak
+- GUI'yi sadece admin panel olarak birakmak
+
+Guvenlik notu:
+- admin islemleri icin X-Admin-Token zorunlu olmali
+- ADMIN_TOKEN ve SERVER_LICENSE_SECRET sadece .env / sunucu env icinde durmali
+- server portu dogrudan internete acilmaz, nginx uzerinden HTTPS ile yayinlanir

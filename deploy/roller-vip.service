@@ -1,0 +1,14 @@
+[Unit]
+Description=Server Local Online API
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/server-local
+ExecStart=/usr/bin/python3 /opt/server-local/server.py
+Restart=always
+RestartSec=3
+User=www-data
+EnvironmentFile=/opt/server-local/.env
+
+[Install]
+WantedBy=multi-user.target
