@@ -509,6 +509,355 @@ def poll_all_telegram_bots():
         threading.Event().wait(5)
 
 
+def _to_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(value))
+        except Exception:
+            return default
+
+
+def normalize_percent_value(raw_value=0):
+    return float(raw_value or 0) / 100.0
+
+
+def calculate_miner_base_effective_power(miner=None):
+    miner = miner or {}
+    power = float(miner.get('power') or 0)
+    miner_bonus_percent = normalize_percent_value(miner.get('bonus_percent') or 0)
+    return int(round(power * (1 + (miner_bonus_percent / 100.0))))
+
+
+def calculate_rack_boosted_power(miner_or_power=0, rack_bonus=0):
+    if isinstance(miner_or_power, dict):
+        base_effective_power = calculate_miner_base_effective_power(miner_or_power)
+    else:
+        base_effective_power = float(miner_or_power or 0)
+    rack_bonus_percent = normalize_percent_value(rack_bonus or 0)
+    return int(round(base_effective_power * (1 + (rack_bonus_percent / 100.0))))
+
+
+def expand_inventory_miner_items(items=None):
+    expanded = []
+    for item in (items or []):
+        quantity = max(0, _to_int(item.get('quantity') or 0))
+        for idx in range(quantity):
+            row = dict(item or {})
+            row['_id'] = f"inventory-{item.get('miner_id') or 'miner'}-{idx}"
+            row['source'] = 'inventory'
+            row['placement'] = None
+            expanded.append(row)
+    return expanded
+
+
+def expand_inventory_rack_items(items=None):
+    expanded = []
+    for item in (items or []):
+        quantity = max(0, _to_int(item.get('quantity') or 0))
+        for idx in range(quantity):
+            row = dict(item or {})
+            row['_id'] = f"inventory-rack-{item.get('rack_id') or 'rack'}-{idx}"
+            row['source'] = 'inventory'
+            row['placement'] = None
+            row['rack_info'] = row.get('rack_info') or {'width': 2, 'height': (_to_int(row.get('cells') or 0) // 2) or 3}
+            row['bonus'] = _to_int(row.get('bonus') or 0)
+            expanded.append(row)
+    return expanded
+
+
+def ensure_room_data_augmented(room_data):
+    room_data = dict(room_data or {})
+    room_data['inventoryItems'] = room_data.get('inventoryItems') or []
+    room_data['rackInventoryItems'] = room_data.get('rackInventoryItems') or []
+    room_data['miners'] = room_data.get('miners') or []
+    room_data['racks'] = room_data.get('racks') or []
+    room_data['minersAll'] = room_data.get('minersAll') or ([dict(m, source='room') for m in room_data['miners']] + expand_inventory_miner_items(room_data['inventoryItems']))
+    room_data['racksAll'] = room_data.get('racksAll') or ([dict(r, source='room') for r in room_data['racks']] + expand_inventory_rack_items(room_data['rackInventoryItems']))
+    return room_data
+
+
+def get_room_rack_grid_info(room_data):
+    racks = room_data.get('racks') or []
+    first_rack = racks[0] if racks else {}
+    rooms_available = room_data.get('rooms_available') or []
+    first_room = rooms_available[0] if rooms_available else {}
+    user_room_id = (((first_rack.get('placement') or {}).get('user_room_id')) or first_room.get('_id') or '')
+    room_level = _to_int(((first_rack.get('placement') or {}).get('room_level')) or ((first_room.get('room_info') or {}).get('level')) or 0)
+    room_levels = ((room_data.get('appearance') or {}).get('room_levels_config') or [])
+    room_config = next((cfg for cfg in room_levels if _to_int(cfg.get('level') or 0) == room_level), None) or (room_levels[0] if room_levels else None) or first_room.get('room_info') or {}
+    slot_cols = max(1, _to_int(room_config.get('cols') or 8) // 2)
+    slot_rows = max(1, _to_int(room_config.get('rows') or 3))
+    return {'userRoomId': user_room_id, 'roomLevel': room_level, 'slotCols': slot_cols, 'slotRows': slot_rows, 'totalSlots': slot_cols * slot_rows}
+
+
+def get_rack_candidate_value(rack=None):
+    rack = rack or {}
+    height = _to_int(((rack.get('rack_info') or {}).get('height')) or 0)
+    bonus_percent = normalize_percent_value(rack.get('bonus') or 0)
+    return height * (1 + (bonus_percent / 100.0))
+
+
+def rack_cmp_tuple(rack=None):
+    rack = rack or {}
+    return (
+        -get_rack_candidate_value(rack),
+        -_to_int(rack.get('bonus') or 0),
+        -_to_int(((rack.get('rack_info') or {}).get('height')) or 0),
+        str(rack.get('name') or ''),
+        str(rack.get('_id') or rack.get('rack_id') or '')
+    )
+
+
+def build_full_rack_placement_plan(room_data, strategy='value'):
+    room_data = ensure_room_data_augmented(room_data)
+    grid = get_room_rack_grid_info(room_data)
+    slot_list = []
+    for y in range(grid['slotRows']):
+        for x in range(grid['slotCols']):
+            slot_list.append({'x': x, 'y': y, 'rackIndex': (y * grid['slotCols']) + x, 'user_room_id': grid['userRoomId'], 'room_level': grid['roomLevel']})
+
+    current_racks = [dict(r, source='room') for r in (room_data.get('racks') or [])]
+    inventory_racks = expand_inventory_rack_items(room_data.get('rackInventoryItems') or [])
+    all_candidates = current_racks + inventory_racks
+
+    def sort_key_value(r):
+        return rack_cmp_tuple(r)
+
+    def sort_key_bonus_first(r):
+        return (-_to_int(r.get('bonus') or 0), -_to_int(((r.get('rack_info') or {}).get('height')) or 0), *rack_cmp_tuple(r)[3:])
+
+    def sort_key_height_first(r):
+        return (-_to_int(((r.get('rack_info') or {}).get('height')) or 0), -_to_int(r.get('bonus') or 0), *rack_cmp_tuple(r)[3:])
+
+    key_fn = sort_key_value if strategy == 'value' else (sort_key_bonus_first if strategy == 'bonus-first' else sort_key_height_first)
+    all_candidates = sorted(all_candidates, key=key_fn)
+    selected_racks = all_candidates[:len(slot_list)]
+    placements = []
+    for index, rack in enumerate(selected_racks):
+        placements.append({'rack': {**rack, '_virtualRackId': f'virtual-rack-{index}'}, 'slot': slot_list[index]})
+
+    return {
+        'strategy': strategy,
+        'grid': grid,
+        'slotList': slot_list,
+        'currentRacks': current_racks,
+        'inventoryRacks': inventory_racks,
+        'selectedRacks': selected_racks,
+        'placements': placements,
+        'rackIdsToClear': [r.get('_id') for r in current_racks if r.get('_id')]
+    }
+
+
+def build_virtual_room_data_for_plan(room_data, rack_plan):
+    virtual_racks = []
+    for index, item in enumerate(rack_plan.get('placements') or []):
+        rack = dict(item.get('rack') or {})
+        slot = item.get('slot') or {}
+        rack['_id'] = rack.get('_virtualRackId') or f'virtual-rack-{index}'
+        rack['placement'] = {
+            'x': _to_int(slot.get('x') or 0),
+            'y': _to_int(slot.get('y') or 0),
+            'rackIndex': _to_int(slot.get('rackIndex') or index),
+            'user_room_id': slot.get('user_room_id') or '',
+            'room_level': _to_int(slot.get('room_level') or 0)
+        }
+        virtual_racks.append(rack)
+    out = dict(room_data or {})
+    out['racks'] = virtual_racks
+    out['miners'] = []
+    return out
+
+
+def build_miner_row_targets(room_data):
+    rows = []
+    for rack in (room_data.get('racks') or []):
+        height = _to_int(((rack.get('rack_info') or {}).get('height')) or 0)
+        bonus = _to_int(rack.get('bonus') or 0)
+        placement = rack.get('placement') or {}
+        for y in range(height):
+            rows.append({
+                'rackId': rack.get('_id'),
+                'rackName': rack.get('name') or 'Rack',
+                'bonus': bonus,
+                'row': y,
+                'rackHeight': height,
+                'roomX': _to_int(placement.get('x') or 0),
+                'roomY': _to_int(placement.get('y') or 0)
+            })
+    return rows
+
+
+def row_sort_key(row, strategy='bonus-desc'):
+    if strategy == 'rack-grouped':
+        return (-_to_int(row.get('bonus') or 0), -_to_int(row.get('rackHeight') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('row') or 0))
+    if strategy == 'tall-first':
+        return (-_to_int(row.get('rackHeight') or 0), -_to_int(row.get('bonus') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
+    return (-_to_int(row.get('bonus') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
+
+
+def miner_sort_key(miner, strategy='power'):
+    power = calculate_miner_base_effective_power(miner)
+    width = max(1, _to_int(miner.get('width') or 1))
+    density = power / width
+    base = []
+    if strategy == 'density':
+        base.append(-density)
+    base.append(-power)
+    base.append(width if strategy == 'single-priority' else -width)
+    base.append(str(miner.get('name') or ''))
+    base.append(str(miner.get('_id') or miner.get('miner_id') or ''))
+    return tuple(base)
+
+
+def build_miner_auto_plan(room_data, row_strategy='bonus-desc', miner_strategy='power'):
+    row_targets = sorted(build_miner_row_targets(room_data), key=lambda row: row_sort_key(row, row_strategy))
+    miners = [dict(m) for m in (room_data.get('minersAll') or room_data.get('miners') or [])]
+    width_one = sorted([m for m in miners if _to_int(m.get('width') or 1) <= 1], key=lambda m: miner_sort_key(m, miner_strategy))
+    width_two = sorted([m for m in miners if _to_int(m.get('width') or 1) >= 2], key=lambda m: miner_sort_key(m, miner_strategy))
+    multipliers = [1 + (normalize_percent_value(row.get('bonus') or 0) / 100.0) for row in row_targets]
+
+    states = {'0|0': {'score': 0.0, 'prev': None, 'choice': None}}
+    layers = [states]
+    for row_index in range(len(row_targets)):
+        next_states = {}
+        multiplier = multipliers[row_index] if row_index < len(multipliers) else 1
+
+        def put_state(key, candidate):
+            existing = next_states.get(key)
+            if existing is None or candidate['score'] > existing['score']:
+                next_states[key] = candidate
+
+        for key, state in states.items():
+            used_two, used_one = [int(x) for x in key.split('|')]
+            put_state(f'{used_two}|{used_one}', {'score': state['score'], 'prev': key, 'choice': {'type': 'empty', 'rowIndex': row_index}})
+            if used_two < len(width_two):
+                miner = width_two[used_two]
+                put_state(f'{used_two + 1}|{used_one}', {'score': state['score'] + (calculate_miner_base_effective_power(miner) * multiplier), 'prev': key, 'choice': {'type': 'double', 'rowIndex': row_index, 'miners': [miner]}})
+            if used_one < len(width_one):
+                miner = width_one[used_one]
+                put_state(f'{used_two}|{used_one + 1}', {'score': state['score'] + (calculate_miner_base_effective_power(miner) * multiplier), 'prev': key, 'choice': {'type': 'single', 'rowIndex': row_index, 'miners': [miner]}})
+            if (used_one + 1) < len(width_one):
+                miner_a = width_one[used_one]
+                miner_b = width_one[used_one + 1]
+                pair_score = state['score'] + ((calculate_miner_base_effective_power(miner_a) + calculate_miner_base_effective_power(miner_b)) * multiplier)
+                put_state(f'{used_two}|{used_one + 2}', {'score': pair_score, 'prev': key, 'choice': {'type': 'pair', 'rowIndex': row_index, 'miners': [miner_a, miner_b]}})
+        states = next_states
+        layers.append(states)
+
+    best_key = '0|0'
+    best_state = {'score': float('-inf')}
+    for key, state in states.items():
+        if state['score'] > best_state['score']:
+            best_state = state
+            best_key = key
+
+    selected_rows = []
+    for row_index in range(len(row_targets), 0, -1):
+        layer = layers[row_index]
+        state = layer.get(best_key)
+        if not state:
+            break
+        if state.get('choice') and state['choice'].get('type') != 'empty':
+            selected_rows.append(state['choice'])
+        best_key = state.get('prev')
+        if best_key is None:
+            break
+    selected_rows.reverse()
+
+    assignments = []
+    for choice in selected_rows:
+        row_target = row_targets[choice['rowIndex']]
+        for miner_index, miner in enumerate(choice.get('miners') or []):
+            width = max(1, _to_int(miner.get('width') or 1))
+            assignments.append({
+                'miner': miner,
+                'target': row_target,
+                'placement': {'user_rack_id': row_target['rackId'], 'x': 0 if width >= 2 else miner_index, 'y': row_target['row']},
+                'boostedPower': calculate_rack_boosted_power(miner, row_target.get('bonus') or 0)
+            })
+
+    assigned_ids = {str((item.get('miner') or {}).get('_id') or '') for item in assignments if (item.get('miner') or {}).get('_id')}
+    skipped_miners = [miner for miner in miners if str(miner.get('_id') or '') not in assigned_ids]
+    return {
+        'assignments': assignments,
+        'rowTargets': row_targets,
+        'skippedMiners': skipped_miners,
+        'rowStrategy': row_strategy,
+        'minerStrategy': miner_strategy,
+        'totalRawPower': sum(_to_int((item.get('miner') or {}).get('power') or 0) for item in assignments),
+        'totalMinerAdjustedPower': sum(calculate_miner_base_effective_power(item.get('miner') or {}) for item in assignments),
+        'totalBoostedPower': sum(_to_int(item.get('boostedPower') or 0) for item in assignments)
+    }
+
+
+def build_best_miner_arrangement(room_data):
+    room_data = ensure_room_data_augmented(room_data)
+    candidates = []
+    for rack_strategy in ['value', 'bonus-first', 'height-first']:
+        rack_plan = build_full_rack_placement_plan(room_data, rack_strategy)
+        virtual_room_data = build_virtual_room_data_for_plan({**room_data, 'minersAll': [dict(m) for m in (room_data.get('minersAll') or room_data.get('miners') or [])]}, rack_plan)
+        for row_strategy in ['bonus-desc', 'rack-grouped', 'tall-first']:
+            for miner_strategy in ['power', 'density', 'single-priority']:
+                plan = build_miner_auto_plan(virtual_room_data, row_strategy, miner_strategy)
+                candidates.append({'label': f'{rack_strategy}|{row_strategy}|{miner_strategy}', 'rackStrategy': rack_strategy, 'rowStrategy': row_strategy, 'minerStrategy': miner_strategy, 'rackPlan': rack_plan, 'virtualRoomData': virtual_room_data, 'plan': plan})
+
+    candidates.sort(key=lambda c: (-_to_int(((c.get('plan') or {}).get('totalBoostedPower')) or 0), _to_int(len(((c.get('plan') or {}).get('skippedMiners') or []))), -_to_int(((c.get('plan') or {}).get('totalRawPower')) or 0), str(c.get('label') or '')))
+    for index, candidate in enumerate(candidates):
+        candidate['rank'] = index + 1
+    return {'best': candidates[0] if candidates else None, 'candidates': candidates}
+
+
+def summarize_current_miner_layout(room_data):
+    rack_map = {rack.get('_id'): rack for rack in (room_data.get('racks') or [])}
+    total_raw_power = sum(_to_int(miner.get('power') or 0) for miner in (room_data.get('miners') or []))
+    total_miner_adjusted_power = sum(calculate_miner_base_effective_power(miner) for miner in (room_data.get('miners') or []))
+    total_boosted_power = 0
+    for miner in (room_data.get('miners') or []):
+        rack = rack_map.get(((miner.get('placement') or {}).get('user_rack_id')))
+        total_boosted_power += calculate_rack_boosted_power(miner, (rack or {}).get('bonus') or 0)
+    return {'totalRawPower': total_raw_power, 'totalMinerAdjustedPower': total_miner_adjusted_power, 'totalBoostedPower': total_boosted_power}
+
+
+def build_miner_plan_payload(room_data):
+    room_data = ensure_room_data_augmented(room_data)
+    arrangement = build_best_miner_arrangement(room_data)
+    source_key = f"{len(room_data.get('minersAll') or [])}:{len(room_data.get('racks') or [])}"
+    arrangement['sourceKey'] = source_key
+    return {'summary': summarize_current_miner_layout(room_data), 'arrangement': arrangement, 'sourceKey': source_key}
+
+
+@app.route('/api/miner/bootstrap', methods=['GET'])
+def api_miner_bootstrap():
+    return jsonify({
+        'success': True,
+        'enabled': True,
+        'mode': 'server-brain-required',
+        'routes': {
+            'arrange_plan': '/api/miner/arrange-plan'
+        }
+    })
+
+
+@app.route('/api/miner/arrange-plan', methods=['POST'])
+def api_miner_arrange_plan():
+    data = request.get_json() or {}
+    uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+    room_data = data.get('room_data') or data.get('roomData') or {}
+    if not uid:
+        return jsonify({'success': False, 'error': 'uid gerekli'})
+    if not isinstance(room_data, dict) or not isinstance(room_data.get('racks') or [], list):
+        return jsonify({'success': False, 'error': 'room_data gerekli'})
+    try:
+        payload = build_miner_plan_payload(room_data)
+        log_event(f'Miner plan hesaplandi: {uid[:8]}... racks={len((room_data.get("racks") or []))} miners={len((room_data.get("minersAll") or room_data.get("miners") or []))}')
+        return jsonify({'success': True, **payload})
+    except Exception as e:
+        log_event(f'Miner plan hatasi: {e}')
+        return jsonify({'success': False, 'error': str(e)})
+
+
 def valid_session(user, token):
     return any(str(s.get('token') or '').strip() == token for s in (user.get('sessions') or []))
 
