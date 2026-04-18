@@ -18,6 +18,7 @@ LICENSES_FILE = DATA_DIR / 'licenses.json'
 NOTICE_FILE = DATA_DIR / 'notice.json'
 LOGS_FILE = DATA_DIR / 'server_logs.txt'
 BOT_FILE = DATA_DIR / 'bot.txt'
+BOT_ANDROID_FILE = DATA_DIR / 'bot_android.txt'
 GAMES_FILE = DATA_DIR / 'games.json'
 REVOKED_LICENSES_FILE = DATA_DIR / 'revoked_licenses.json'
 QUICK_LINKS_FILE = DATA_DIR / 'quick_links.json'
@@ -28,6 +29,7 @@ for p, default in [
     (NOTICE_FILE, '{"id":"","text":"","created_at":""}'),
     (LOGS_FILE, ''),
     (BOT_FILE, ''),
+    (BOT_ANDROID_FILE, ''),
     (GAMES_FILE, '{}'),
     (REVOKED_LICENSES_FILE, '[]'),
     (QUICK_LINKS_FILE, '{"telegram":"","youtube":""}'),

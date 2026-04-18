@@ -17,7 +17,7 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
     HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
-    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, GAMES_FILE, REVOKED_LICENSES_FILE, QUICK_LINKS_FILE
+    USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, BOT_ANDROID_FILE, GAMES_FILE, REVOKED_LICENSES_FILE, QUICK_LINKS_FILE
 )
 
 app = Flask(__name__)
@@ -51,6 +51,7 @@ REMOTE_STATE_KEYS = {
     str(LICENSES_FILE): 'licenses',
     str(NOTICE_FILE): 'notice',
     str(BOT_FILE): 'bot',
+    str(BOT_ANDROID_FILE): 'bot_android',
     str(GAMES_FILE): 'games',
     str(REVOKED_LICENSES_FILE): 'revoked_licenses',
     str(QUICK_LINKS_FILE): 'quick_links',
@@ -212,6 +213,122 @@ def patch_bot_content(content: str):
     content = content.replace('http://127.0.0.1:5003', server_url)
     content = content.replace('http://127.0.0.1:5005', server_url)
     return content
+
+
+def get_variant_file(is_android=False):
+    return BOT_ANDROID_FILE if is_android else BOT_FILE
+
+
+def load_variant_bot_content(is_android=False):
+    target_file = get_variant_file(is_android)
+    fallback_file = BOT_FILE
+    bot_content = load_json(target_file, '') if _supabase_enabled() else target_file.read_text(encoding='utf-8', errors='ignore')
+    if isinstance(bot_content, dict):
+        bot_content = ''
+    bot_content = str(bot_content or '')
+    if not bot_content.strip() and is_android:
+        fallback_content = load_json(fallback_file, '') if _supabase_enabled() else fallback_file.read_text(encoding='utf-8', errors='ignore')
+        if isinstance(fallback_content, dict):
+            fallback_content = ''
+        bot_content = str(fallback_content or '')
+    return bot_content
+
+
+def save_variant_bot_content(content: str, is_android=False):
+    target_file = get_variant_file(is_android)
+    content = re.sub(r"const\s+PY_URL\s*=\s*['\"]http://127\.0\.0\.1:\d+['\"]\s*;", "const PY_URL = '__SERVER_URL__';", content)
+    content = content.replace('http://127.0.0.1:5003', '__SERVER_URL__')
+    content = content.replace('http://127.0.0.1:5005', '__SERVER_URL__')
+    save_json(target_file, content)
+    target_file.write_text(content, encoding='utf-8')
+
+
+ANDROID_UI_PATCH = r'''
+(function(){
+    try {
+        if (window.__VIP_ANDROID_UI_PATCHED__) return;
+        window.__VIP_ANDROID_UI_PATCHED__ = true;
+        const style = document.createElement('style');
+        style.textContent = `
+            .rc-float-window{max-width:96vw !important;min-width:0 !important;touch-action:none !important;}
+            #bot-main-window{width:min(96vw,460px) !important;right:2vw !important;left:auto !important;top:10px !important;}
+            #games-window,#settings-window,#selected-games-window,#miner-window,#history-window,#game-status-window,#level-window,#play-confirm-window{width:min(96vw,var(--vip-mobile-w,720px)) !important;max-width:96vw !important;left:2vw !important;right:auto !important;}
+            .rc-float-header{padding:14px 16px !important;touch-action:none !important;}
+            .rc-btn,.btn-close-window,.rc-modern-btn{min-height:42px !important;font-size:12px !important;}
+            .rc-hamster-btn{width:78px !important;height:78px !important;bottom:16px !important;right:16px !important;}
+            .rc-log{font-size:11px !important;}
+            @media (max-width: 900px){
+                #bot-main-window{width:96vw !important;}
+                #main-content{max-height:74vh !important;padding:12px !important;}
+                .rc-action-grid,.rc-action-grid.secondary{grid-template-columns:1fr !important;}
+                #games-list-content{grid-template-columns:1fr !important;}
+                .level-stats{grid-template-columns:1fr !important;}
+            }
+        `;
+        document.head.appendChild(style);
+
+        let state = null;
+        const getWin = (el) => el && (el.classList?.contains('rc-float-window') ? el : el.closest('.rc-float-window'));
+
+        document.addEventListener('pointerdown', (e) => {
+            if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+            const header = e.target.closest('.rc-float-header');
+            const win = getWin(header);
+            if (!header || !win) return;
+            if (e.target.closest('button,input,select,textarea,label,a')) return;
+            const rect = win.getBoundingClientRect();
+            state = { id: e.pointerId, win, startX: e.clientX, startY: e.clientY, offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top, moved: false };
+            win.style.left = rect.left + 'px';
+            win.style.top = rect.top + 'px';
+            win.style.right = 'auto';
+            win.style.bottom = 'auto';
+            win.classList.add('dragging');
+        }, true);
+
+        document.addEventListener('pointermove', (e) => {
+            if (!state || e.pointerId !== state.id) return;
+            const maxLeft = Math.max(0, window.innerWidth - state.win.offsetWidth);
+            const maxTop = Math.max(0, window.innerHeight - state.win.offsetHeight);
+            const left = Math.max(0, Math.min(maxLeft, e.clientX - state.offsetX));
+            const top = Math.max(0, Math.min(maxTop, e.clientY - state.offsetY));
+            state.win.style.left = left + 'px';
+            state.win.style.top = top + 'px';
+            if (Math.abs(e.clientX - state.startX) > 4 || Math.abs(e.clientY - state.startY) > 4) state.moved = true;
+        }, true);
+
+        document.addEventListener('pointerup', (e) => {
+            if (!state || e.pointerId !== state.id) return;
+            const moved = state.moved;
+            state.win.classList.remove('dragging');
+            const targetWin = state.win;
+            state = null;
+            if (moved) {
+                e.preventDefault();
+                e.stopPropagation();
+                targetWin.__vipTouchDraggedAt = Date.now();
+            }
+        }, true);
+
+        document.addEventListener('click', (e) => {
+            const win = getWin(e.target);
+            if (win && win.__vipTouchDraggedAt && Date.now() - win.__vipTouchDraggedAt < 350) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+        }, true);
+    } catch (e) {}
+})();
+'''
+
+
+def apply_android_bot_patch(content: str):
+    content = str(content or '')
+    if not content.strip() or 'window.__VIP_ANDROID_UI_PATCHED__' in content:
+        return content
+    marker = '\n})();'
+    if marker in content:
+        return content.rsplit(marker, 1)[0] + '\n' + ANDROID_UI_PATCH + marker
+    return content + '\n' + ANDROID_UI_PATCH
 
 
 def generate_key(user_id):
@@ -914,6 +1031,7 @@ def api_auth():
     fingerprint = str(data.get('fingerprint') or '').strip()
     incoming_client_id = str(data.get('client_id') or '').strip()
     incoming_hash = str(data.get('script_hash') or '').strip()
+    android_mode = bool(data.get('android_mode', False))
 
     if not uid or not license_key:
         return jsonify({'success': False, 'error': 'Eksik bilgi'})
@@ -998,9 +1116,9 @@ def api_auth():
     save_json(USERS_FILE, users)
     save_json(LICENSES_FILE, licenses)
 
-    bot_code = load_json(BOT_FILE, '')
-    if not isinstance(bot_code, str):
-        bot_code = BOT_FILE.read_text(encoding='utf-8', errors='ignore') if BOT_FILE.exists() else ''
+    bot_code = load_variant_bot_content(android_mode)
+    if bot_code and android_mode:
+        bot_code = apply_android_bot_patch(bot_code)
     if bot_code:
         bot_code = patch_bot_content(bot_code)
     payload = {
@@ -1009,10 +1127,12 @@ def api_auth():
         'uid': uid,
         'language': language,
         'quick_links': load_quick_links(),
+        'android_mode': android_mode,
     }
     if bot_code:
         payload['bot_code'] = encrypt_bot_for_uid(bot_code, uid)
-    log_event(f'Auth ok: {uid[:8]}... -> {license_id}')
+        payload['bot_variant'] = 'android' if android_mode else 'desktop'
+    log_event(f"Auth ok: {uid[:8]}... -> {license_id} / {'android' if android_mode else 'desktop'}")
     return jsonify(payload)
 
 
@@ -1542,10 +1662,10 @@ def admin_notice_user():
 def admin_bot_get():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
-    bot_content = load_json(BOT_FILE, '') if _supabase_enabled() else BOT_FILE.read_text(encoding='utf-8', errors='ignore')
-    if isinstance(bot_content, dict):
-        bot_content = ''
-    return jsonify({'success': True, 'bot_size': len(str(bot_content or ''))})
+    variant = str(request.args.get('variant') or 'desktop').strip().lower()
+    is_android = variant == 'android'
+    bot_content = load_variant_bot_content(is_android)
+    return jsonify({'success': True, 'variant': 'android' if is_android else 'desktop', 'bot_size': len(str(bot_content or ''))})
 
 
 @app.route('/admin/bot', methods=['POST'])
@@ -1553,16 +1673,14 @@ def admin_bot_set():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     data = request.get_json() or {}
+    variant = str(data.get('variant') or 'desktop').strip().lower()
+    is_android = variant == 'android'
     content = str(data.get('content') or '')
     if not content:
         return jsonify({'success': False, 'error': 'Bot icerigi bos'})
-    content = re.sub(r"const\s+PY_URL\s*=\s*['\"]http://127\.0\.0\.1:\d+['\"]\s*;", "const PY_URL = '__SERVER_URL__';", content)
-    content = content.replace('http://127.0.0.1:5003', '__SERVER_URL__')
-    content = content.replace('http://127.0.0.1:5005', '__SERVER_URL__')
-    save_json(BOT_FILE, content)
-    BOT_FILE.write_text(content, encoding='utf-8')
-    log_event('Admin bot guncelledi')
-    return jsonify({'success': True})
+    save_variant_bot_content(content, is_android)
+    log_event(f"Admin bot guncelledi: {'android' if is_android else 'desktop'}")
+    return jsonify({'success': True, 'variant': 'android' if is_android else 'desktop'})
 
 
 @app.route('/admin/games', methods=['GET'])
@@ -1619,6 +1737,7 @@ def admin_sync_all():
     users = data.get('users') or {}
     notice = data.get('notice')
     bot_content = data.get('bot_content')
+    bot_android_content = data.get('bot_android_content')
     games = data.get('games') or {}
     quick_links = data.get('quick_links') or {}
 
@@ -1633,10 +1752,11 @@ def admin_sync_all():
     if isinstance(notice, dict):
         save_json(NOTICE_FILE, notice)
     if isinstance(bot_content, str) and bot_content.strip():
-        save_json(BOT_FILE, bot_content)
-        BOT_FILE.write_text(bot_content, encoding='utf-8')
+        save_variant_bot_content(bot_content, False)
+    if isinstance(bot_android_content, str) and bot_android_content.strip():
+        save_variant_bot_content(bot_android_content, True)
 
-    log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} games={len(games) if isinstance(games, dict) else 0} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'}")
+    log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} games={len(games) if isinstance(games, dict) else 0} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'} android_bot={'var' if isinstance(bot_android_content, str) and bot_android_content.strip() else 'yok'}")
     return jsonify({'success': True, 'licenses_count': len(licenses), 'users_count': len(users)})
 
 
