@@ -144,6 +144,80 @@ def log_event(event):
         f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {event}\n")
 
 
+def get_request_ip(req=None):
+    req = req or request
+    forwarded = str(req.headers.get('X-Forwarded-For') or '').strip()
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return str(req.remote_addr or '').strip()
+
+
+def log_admin_action(action, license_id=None, details=None):
+    try:
+        entry = {
+            'time': datetime.now().isoformat(),
+            'action': str(action or '').strip(),
+            'license_id': str(license_id or '').strip(),
+            'ip': get_request_ip(),
+            'details': details or {}
+        }
+        log_event(f"ADMIN: {json.dumps(entry, ensure_ascii=False)}")
+    except Exception as e:
+        log_event(f'ADMIN LOG ERROR: {e}')
+
+
+def verify_bot_files():
+    for target_file, name in ((BOT_FILE, 'desktop'), (BOT_ANDROID_FILE, 'android')):
+        try:
+            content = target_file.read_text(encoding='utf-8', errors='ignore') if target_file.exists() else ''
+            if not str(content or '').strip():
+                log_event(f'WARNING: {name} bot dosyasi bos veya eksik')
+                continue
+            if 'function' not in content and '=>' not in content and '(function' not in content:
+                log_event(f'WARNING: {name} bot dosyasi gecerli JS gibi gorunmuyor')
+            checksum = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+            log_event(f'Bot {name} checksum: {checksum}')
+        except Exception as e:
+            log_event(f'Bot verify error ({name}): {e}')
+
+
+def check_license_anomaly(license_row, uid, fingerprint, client_ip):
+    row = license_row or {}
+    alerts = []
+    last_uid = str(row.get('uid') or '').strip().lower()
+    if last_uid and uid and last_uid != uid:
+        alerts.append(f'UID degisikligi: {last_uid[:8]}... -> {uid[:8]}...')
+    last_ip = str(row.get('last_ip') or '').strip()
+    if last_ip and client_ip and last_ip != client_ip:
+        try:
+            if '.'.join(last_ip.split('.')[:3]) != '.'.join(client_ip.split('.')[:3]):
+                alerts.append(f'IP degisikligi: {last_ip} -> {client_ip}')
+        except Exception:
+            alerts.append(f'IP degisikligi: {last_ip} -> {client_ip}')
+    last_auth = str(row.get('last_auth_time') or '').strip()
+    if last_auth:
+        try:
+            seconds_since = (datetime.now() - datetime.fromisoformat(last_auth)).total_seconds()
+            if seconds_since < 60:
+                alerts.append(f'Hizli auth: {seconds_since:.0f}s once')
+        except Exception:
+            pass
+    if fingerprint and row.get('last_fingerprint') and str(row.get('last_fingerprint')) != str(fingerprint):
+        alerts.append('Fingerprint degisikligi')
+    for alert in alerts:
+        log_event(f"ANOMALY [{row.get('license_id') or '-'}]: {alert}")
+    if alerts:
+        row['last_anomaly'] = datetime.now().isoformat()
+        row['anomaly_count'] = int(row.get('anomaly_count') or 0) + len(alerts)
+        row['status'] = 'suspicious'
+        row['suspicious_reason'] = ' | '.join(alerts)[:500]
+    row['last_ip'] = client_ip
+    row['last_auth_time'] = datetime.now().isoformat()
+    if fingerprint:
+        row['last_fingerprint'] = str(fingerprint)
+    return row
+
+
 def check_admin(req):
     token = str(req.headers.get('X-Admin-Token') or '').strip()
     return bool(ADMIN_TOKEN) and bool(token) and hmac.compare_digest(token, ADMIN_TOKEN)
@@ -1103,6 +1177,8 @@ def api_auth():
         }
 
     row = licenses[license_id]
+    client_ip = get_request_ip(request)
+    row = check_license_anomaly(row, uid, fingerprint, client_ip)
     if not row.get('active', True):
         return jsonify({'success': False, 'error': 'Lisans pasif'})
 
@@ -1149,6 +1225,7 @@ def api_auth():
 
     row['language'] = language
     row['last_login'] = datetime.now().isoformat()
+    row['last_ip'] = client_ip
     save_json(USERS_FILE, users)
     save_json(LICENSES_FILE, licenses)
 
@@ -1572,6 +1649,7 @@ def admin_license_create():
         'message_id': ''
     }
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('license_create', license_id, {'client_name': client_name, 'script_file': script_file})
     log_event(f'Admin lisans olusturdu: {license_id}')
     return jsonify({'success': True, 'license': licenses[license_id]})
 
@@ -1596,6 +1674,7 @@ def admin_license_state():
         row['suspicious_reason'] = ''
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('license_state', license_id, {'active': active})
     log_event(f'Admin lisans durum degistirdi: {license_id} -> {active}')
     return jsonify({'success': True, 'license': row})
 
@@ -1617,6 +1696,7 @@ def admin_license_uid_mode():
     row['allow_uid_change'] = allow_uid_change
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('license_uid_mode', license_id, {'allow_uid_change': allow_uid_change})
     log_event(f'Admin uid modu degisti: {license_id} -> allow_uid_change={allow_uid_change}')
     return jsonify({'success': True, 'license': row})
 
@@ -1649,6 +1729,7 @@ def admin_license_delete():
         users.pop(bound_uid, None)
         save_json(USERS_FILE, users)
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('license_delete', license_id, {'bound_uid': bound_uid})
     log_event(f'Admin lisans sildi: {license_id}')
     return jsonify({'success': True})
 
@@ -1672,6 +1753,7 @@ def admin_notice():
         licenses[lid]['message_status'] = 'Gonderildi'
         licenses[lid]['message_id'] = notice['id']
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('global_notice', '', {'text_preview': text[:80]})
     log_event('Admin notice guncellendi')
     return jsonify({'success': True, 'notice': notice})
 
@@ -1711,6 +1793,7 @@ def admin_notice_user():
     row['message_id'] = notice['id']
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
+    log_admin_action('personal_notice', license_id, {'uid': uid, 'text_preview': text[:80]})
     log_event(f'Admin ozel mesaj gonderdi: {license_id}')
     return jsonify({'success': True, 'notice': notice})
 
@@ -1740,6 +1823,7 @@ def admin_bot_set():
     if len(content) > (2 * 1024 * 1024):
         return jsonify({'success': False, 'error': 'Bot icerigi cok buyuk'})
     save_variant_bot_content(content, is_android)
+    log_admin_action('bot_update', '', {'variant': 'android' if is_android else 'desktop', 'size': len(content)})
     log_event(f"Admin bot guncelledi: {'android' if is_android else 'desktop'}")
     return jsonify({'success': True, 'variant': 'android' if is_android else 'desktop'})
 
@@ -1763,6 +1847,7 @@ def admin_games_set():
         return jsonify({'success': False, 'error': 'Gecersiz games verisi'})
     games = normalize_games_map(games)
     save_json(GAMES_FILE, games)
+    log_admin_action('games_update', '', {'count': len(games)})
     log_event(f'Admin games guncelledi: {len(games)} oyun')
     return jsonify({'success': True, 'count': len(games)})
 
@@ -1777,6 +1862,7 @@ def admin_bot_command():
     if not command:
         return jsonify({'success': False, 'error': 'Komut bos'})
     pending_commands.append({'command': command, 'time': datetime.now().isoformat(), 'source': 'admin'})
+    log_admin_action('bot_command', '', {'command': command})
     return jsonify({'success': True})
 
 
@@ -1790,6 +1876,7 @@ def admin_client_command():
     if not command:
         return jsonify({'success': False, 'error': 'Komut bos'})
     client_pending_commands.append({'command': command, 'time': datetime.now().isoformat(), 'source': 'admin'})
+    log_admin_action('client_command', '', {'command': command})
     return jsonify({'success': True})
 
 
@@ -1822,12 +1909,20 @@ def admin_sync_all():
     if isinstance(bot_android_content, str) and bot_android_content.strip():
         save_variant_bot_content(bot_android_content, True)
 
+    log_admin_action('sync_all', '', {
+        'licenses_count': len(licenses),
+        'users_count': len(users),
+        'games_count': len(games) if isinstance(games, dict) else 0,
+        'bot': bool(isinstance(bot_content, str) and bot_content.strip()),
+        'bot_android': bool(isinstance(bot_android_content, str) and bot_android_content.strip())
+    })
     log_event(f"Admin tam senkron yapti: licenses={len(licenses)} users={len(users)} games={len(games) if isinstance(games, dict) else 0} bot={'var' if isinstance(bot_content, str) and bot_content.strip() else 'yok'} android_bot={'var' if isinstance(bot_android_content, str) and bot_android_content.strip() else 'yok'}")
     return jsonify({'success': True, 'licenses_count': len(licenses), 'users_count': len(users)})
 
 
 if __name__ == '__main__':
     log_event('Server basladi')
+    verify_bot_files()
     if not ADMIN_TOKEN:
         log_event('UYARI: ADMIN_TOKEN bos.')
     telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
