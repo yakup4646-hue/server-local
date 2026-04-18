@@ -571,7 +571,7 @@ def build_license_telegram_menu(_license_id=None):
         'keyboard': [
             ['🎮 Bot Durumu'],
             ['▶️ Başlat', '⏹️ Durdur'],
-            ['🧹 İstatistik Sıfırla']
+            ['📸 Ekran Al', '🧹 İstatistik Sıfırla']
         ],
         'resize_keyboard': True,
         'one_time_keyboard': False,
@@ -587,6 +587,8 @@ def build_license_menu_text(action=None, extra=None):
         return '⏹️ Durdur komutu gonderildi.'
     if action == 'refresh':
         return '🔄 Sayfa yenile komutu gonderildi.'
+    if action == 'screenshot':
+        return '📸 Ekran alma komutu gonderildi.'
     if action == 'reset_stats':
         return '🧹 Istatistik sifirlama komutu gonderildi.'
     return '🎮 Roller VIP kontrol menusu\n\nAlt menuden islem sec.'
@@ -675,6 +677,9 @@ def process_telegram_action(license_row, action):
     if action == 'refresh':
         queue_client_command('refresh_page')
         return _send_license_reply(license_row, build_license_menu_text('refresh'), True)
+    if action == 'screenshot':
+        queue_client_command('send_screenshot')
+        return _send_license_reply(license_row, build_license_menu_text('screenshot'), True)
     if action == 'reset_stats':
         queue_bot_command('reset_stats')
         return _send_license_reply(license_row, build_license_menu_text('reset_stats'), True)
@@ -715,6 +720,8 @@ def poll_all_telegram_bots():
                         process_telegram_action(row, 'start')
                     elif text in {'⏹️ durdur'}:
                         process_telegram_action(row, 'stop')
+                    elif text in {'📸 ekran al'}:
+                        process_telegram_action(row, 'screenshot')
                     elif text in {'🧹 i̇statistik sıfırla', '🧹 istatistik sıfırla', '🧹 istatistik sifirla'}:
                         process_telegram_action(row, 'reset_stats')
             if changed:
