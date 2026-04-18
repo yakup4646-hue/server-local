@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import json
 import base64
 import hashlib
@@ -23,6 +25,11 @@ from config import (
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": ALLOWED_ORIGINS or "*"}})
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["300 per minute"]
+)
 
 IV = b'dYQ9R99bkKLsLHad'
 START_DATA_STATIC_UID = '5fc1680d30660d0037f390ba'
@@ -994,6 +1001,7 @@ def api_miner_bootstrap():
 
 
 @app.route('/api/miner/arrange-plan', methods=['POST'])
+@limiter.limit("30 per minute")
 def api_miner_arrange_plan():
     data = request.get_json() or {}
     uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
@@ -1041,6 +1049,7 @@ def api_health():
 
 
 @app.route('/api/auth', methods=['POST'])
+@limiter.limit("10 per minute")
 def api_auth():
     data = request.get_json() or {}
     uid = str(data.get('uid') or '').strip().lower()
@@ -1163,6 +1172,7 @@ def api_auth():
 
 
 @app.route('/api/heartbeat', methods=['POST'])
+@limiter.limit("120 per minute")
 def api_heartbeat():
     data = request.get_json() or {}
     token = str(data.get('token') or '').strip()
@@ -1194,6 +1204,7 @@ def api_heartbeat():
 
 
 @app.route('/api/telegram/register', methods=['POST'])
+@limiter.limit("10 per minute")
 def api_telegram_register():
     data = request.get_json() or {}
     token = str(data.get('token') or '').strip()
@@ -1229,6 +1240,7 @@ def api_telegram_register():
 
 
 @app.route('/api/client/command', methods=['POST'])
+@limiter.limit("120 per minute")
 def api_client_command():
     data = request.get_json() or {}
     token = str(data.get('token') or '').strip()
@@ -1404,6 +1416,7 @@ def api_notice_ack():
 
 
 @app.route('/api/telegram/screenshot', methods=['POST'])
+@limiter.limit("10 per minute")
 def api_telegram_screenshot():
     data = request.get_json() or {}
     token = str(data.get('token') or '').strip()
@@ -1439,6 +1452,7 @@ def api_telegram_screenshot():
 
 
 @app.route('/api/notice/next', methods=['POST'])
+@limiter.limit("60 per minute")
 def api_notice_next():
     data = request.get_json() or {}
     token = str(data.get('token') or '').strip()
@@ -1496,6 +1510,7 @@ def api_notice_next():
 
 
 @app.route('/admin/licenses', methods=['GET'])
+@limiter.limit("30 per minute")
 def admin_licenses():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1512,6 +1527,7 @@ def admin_licenses():
 
 
 @app.route('/admin/users', methods=['GET'])
+@limiter.limit("30 per minute")
 def admin_users():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1519,6 +1535,7 @@ def admin_users():
 
 
 @app.route('/admin/license/create', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_license_create():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1559,6 +1576,7 @@ def admin_license_create():
 
 
 @app.route('/admin/license/state', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_license_state():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1582,6 +1600,7 @@ def admin_license_state():
 
 
 @app.route('/admin/license/uid-mode', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_license_uid_mode():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1602,6 +1621,7 @@ def admin_license_uid_mode():
 
 
 @app.route('/admin/license/delete', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_license_delete():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1633,6 +1653,7 @@ def admin_license_delete():
 
 
 @app.route('/admin/notice', methods=['POST'])
+@limiter.limit("20 per minute")
 def admin_notice():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1655,6 +1676,7 @@ def admin_notice():
 
 
 @app.route('/admin/notice/user', methods=['POST'])
+@limiter.limit("20 per minute")
 def admin_notice_user():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1693,6 +1715,7 @@ def admin_notice_user():
 
 
 @app.route('/admin/bot', methods=['GET'])
+@limiter.limit("20 per minute")
 def admin_bot_get():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1703,6 +1726,7 @@ def admin_bot_get():
 
 
 @app.route('/admin/bot', methods=['POST'])
+@limiter.limit("10 per minute")
 def admin_bot_set():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1720,6 +1744,7 @@ def admin_bot_set():
 
 
 @app.route('/admin/games', methods=['GET'])
+@limiter.limit("20 per minute")
 def admin_games_get():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1727,6 +1752,7 @@ def admin_games_get():
 
 
 @app.route('/admin/games', methods=['POST'])
+@limiter.limit("10 per minute")
 def admin_games_set():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1741,6 +1767,7 @@ def admin_games_set():
 
 
 @app.route('/admin/bot-command', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_bot_command():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1753,6 +1780,7 @@ def admin_bot_command():
 
 
 @app.route('/admin/client-command', methods=['POST'])
+@limiter.limit("30 per minute")
 def admin_client_command():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
@@ -1765,6 +1793,7 @@ def admin_client_command():
 
 
 @app.route('/admin/sync-all', methods=['POST'])
+@limiter.limit("20 per minute")
 def admin_sync_all():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
