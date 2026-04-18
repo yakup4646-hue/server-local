@@ -581,6 +581,24 @@ def format_retry_time(epoch_seconds):
         return '-'
 
 
+def screenshot_caption_by_lang(lang='tr'):
+    lang = normalize_lang(lang)
+    if lang == 'en':
+        return 'Roller VIP screenshot\nNOTE: You can request 1 screenshot every 5 minutes.'
+    if lang == 'pr':
+        return 'Captura de tela Roller VIP\nNOTA: Voce pode solicitar 1 captura a cada 5 minutos.'
+    return 'Roller VIP ekran goruntusu\nNOT: 5 dakikada 1 isteyebilirsin.'
+
+
+def screenshot_block_message_by_lang(lang='tr', retry_text='-'):
+    lang = normalize_lang(lang)
+    if lang == 'en':
+        return f'⛔ Too many screenshot requests detected.\n\nTimeout: 1 hour\nAvailable again: {retry_text}'
+    if lang == 'pr':
+        return f'⛔ Muitas solicitacoes de captura foram detectadas.\n\nTempo de espera: 1 hora\nLiberado novamente: {retry_text}'
+    return f'⛔ Cok fazla ekran alma istegi algilandi.\n\nZaman asimi: 1 saat\nTekrar acilma: {retry_text}'
+
+
 def check_screenshot_rate_limit(license_id=''):
     now = time.time()
     key = str(license_id or '-').strip() or '-'
@@ -1569,6 +1587,7 @@ def api_telegram_screenshot():
         return jsonify({'success': False, 'error': 'Script gecersiz'})
     tg_token = str(row.get('telegram_token') or '').strip()
     tg_chat = str(row.get('telegram_chat_id') or '').strip()
+    lang = str(row.get('language') or user.get('language') or 'tr').strip().lower()
     if not tg_token or not tg_chat:
         return jsonify({'success': False, 'error': 'Telegram bagli degil'})
     allowed, limit_state, retry_at = check_screenshot_rate_limit(license_id)
@@ -1577,7 +1596,7 @@ def api_telegram_screenshot():
             retry_text = format_retry_time(retry_at)
             send_telegram_api(tg_token, 'sendMessage', {
                 'chat_id': tg_chat,
-                'text': f'⛔ Cok fazla ekran alma istegi algilandi.\n\nZaman asimi: 1 saat\nTekrar acilma: {retry_text}'
+                'text': screenshot_block_message_by_lang(lang, retry_text)
             })
             log_event(f'Screenshot block aktif: {license_id} / yeniden acilma {retry_text}')
             return jsonify({'success': False, 'error': 'Cok fazla ekran alma istegi. 1 saat engellendi', 'retry_at': retry_text})
@@ -1591,7 +1610,7 @@ def api_telegram_screenshot():
         photo_bytes = base64.b64decode(image)
     except Exception:
         return jsonify({'success': False, 'error': 'Ekran verisi bozuk'})
-    ok, resp = send_telegram_photo(tg_token, tg_chat, photo_bytes, 'Roller VIP ekran goruntusu')
+    ok, resp = send_telegram_photo(tg_token, tg_chat, photo_bytes, screenshot_caption_by_lang(lang))
     if not ok:
         return jsonify({'success': False, 'error': 'Telegrama gonderilemedi', 'detail': resp})
     return jsonify({'success': True})
