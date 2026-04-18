@@ -298,6 +298,7 @@ def load_quick_links():
         'telegram': str(data.get('telegram') or '').strip(),
         'youtube': str(data.get('youtube') or '').strip(),
         'login': str(data.get('login') or '').strip(),
+        'normal': str(data.get('normal') or '').strip(),
     }
 
 
@@ -307,6 +308,7 @@ def save_quick_links(data):
         'telegram': str((data or {}).get('telegram') or '').strip(),
         'youtube': str((data or {}).get('youtube') or '').strip(),
         'login': str((data or {}).get('login') or '').strip(),
+        'normal': str((data or {}).get('normal') or '').strip(),
     })
 
 
@@ -1170,6 +1172,11 @@ def api_health():
     return jsonify({'success': True, 'time': datetime.now().isoformat()})
 
 
+@app.route('/api/public-links', methods=['GET'])
+def api_public_links():
+    return jsonify({'success': True, 'quick_links': load_quick_links()})
+
+
 @app.route('/api/auth', methods=['POST'])
 @limiter.limit("10 per minute")
 def api_auth():
@@ -1813,7 +1820,8 @@ def admin_notice():
         'created_at': datetime.now().isoformat(),
         'links': {
             'telegram': str(links.get('telegram') or '').strip(),
-            'youtube': str(links.get('youtube') or '').strip()
+            'youtube': str(links.get('youtube') or '').strip(),
+            'normal': str(links.get('normal') or '').strip()
         }
     }
     save_json(NOTICE_FILE, notice)
@@ -1859,7 +1867,8 @@ def admin_notice_user():
         'scope': 'personal',
         'links': {
             'telegram': str(links.get('telegram') or '').strip(),
-            'youtube': str(links.get('youtube') or '').strip()
+            'youtube': str(links.get('youtube') or '').strip(),
+            'normal': str(links.get('normal') or '').strip()
         }
     }
     row['personal_notice'] = notice
