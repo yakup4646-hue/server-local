@@ -11,6 +11,7 @@ import secrets
 import hmac
 import re
 import threading
+import time
 from datetime import datetime
 from io import BytesIO
 from urllib import request as urlrequest
@@ -70,6 +71,11 @@ MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
 MAX_SESSIONS_PER_USER = 5
+SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
+SCREENSHOT_BLOCK_SECONDS = 60 * 60
+SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
+SCREENSHOT_VIOLATION_THRESHOLD = 3
+screenshot_rate_state = {}
 
 
 def _supabase_enabled():
@@ -564,6 +570,40 @@ def send_telegram_photo(token, chat_id, photo_bytes, caption=''):
         return False, {'error': str(e)}
     except Exception as e:
         return False, {'error': str(e)}
+
+
+def format_retry_time(epoch_seconds):
+    try:
+        return datetime.fromtimestamp(float(epoch_seconds)).strftime('%d.%m.%Y %H:%M:%S')
+    except Exception:
+        return '-'
+
+
+def check_screenshot_rate_limit(license_id=''):
+    now = time.time()
+    key = str(license_id or '-').strip() or '-'
+    state = screenshot_rate_state.setdefault(key, {
+        'cooldown_until': 0.0,
+        'blocked_until': 0.0,
+        'violations': []
+    })
+    state['violations'] = [ts for ts in (state.get('violations') or []) if (now - float(ts)) <= SCREENSHOT_VIOLATION_WINDOW_SECONDS]
+
+    blocked_until = float(state.get('blocked_until') or 0.0)
+    if blocked_until > now:
+        return False, 'blocked', blocked_until
+
+    cooldown_until = float(state.get('cooldown_until') or 0.0)
+    if cooldown_until > now:
+        state['violations'].append(now)
+        if len(state['violations']) >= SCREENSHOT_VIOLATION_THRESHOLD:
+            state['blocked_until'] = now + SCREENSHOT_BLOCK_SECONDS
+            state['cooldown_until'] = state['blocked_until']
+            return False, 'blocked_new', state['blocked_until']
+        return False, 'cooldown', cooldown_until
+
+    state['cooldown_until'] = now + SCREENSHOT_MIN_INTERVAL_SECONDS
+    return True, 'ok', state['cooldown_until']
 
 
 def build_license_telegram_menu(_license_id=None):
@@ -1524,6 +1564,20 @@ def api_telegram_screenshot():
     tg_chat = str(row.get('telegram_chat_id') or '').strip()
     if not tg_token or not tg_chat:
         return jsonify({'success': False, 'error': 'Telegram bagli degil'})
+    allowed, limit_state, retry_at = check_screenshot_rate_limit(license_id)
+    if not allowed:
+        if limit_state == 'blocked_new':
+            retry_text = format_retry_time(retry_at)
+            send_telegram_api(tg_token, 'sendMessage', {
+                'chat_id': tg_chat,
+                'text': f'⛔ Cok fazla ekran alma istegi algilandi.\n\nZaman asimi: 1 saat\nTekrar acilma: {retry_text}'
+            })
+            log_event(f'Screenshot block aktif: {license_id} / yeniden acilma {retry_text}')
+            return jsonify({'success': False, 'error': 'Cok fazla ekran alma istegi. 1 saat engellendi', 'retry_at': retry_text})
+        if limit_state == 'blocked':
+            return jsonify({'success': False, 'error': 'Ekran alma gecici olarak engelli', 'retry_at': format_retry_time(retry_at)})
+        remaining = max(1, int(retry_at - time.time()))
+        return jsonify({'success': False, 'error': f'Ekran alma limiti var. {remaining} sn sonra tekrar dene', 'retry_at': format_retry_time(retry_at)})
     if ',' in image:
         image = image.split(',', 1)[1]
     try:
@@ -1569,7 +1623,7 @@ def api_notice_next():
                 licenses[license_id]['message_id'] = personal.get('id', '')
                 save_json(LICENSES_FILE, licenses)
             personal_with_links = dict(personal)
-            personal_with_links['links'] = load_quick_links()
+            personal_with_links['links'] = personal.get('links') or {}
             return jsonify({'success': True, 'notice': personal_with_links})
 
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
@@ -1590,7 +1644,7 @@ def api_notice_next():
     users[uid] = user
     save_json(USERS_FILE, users)
     notice_with_links = dict(notice)
-    notice_with_links['links'] = load_quick_links()
+    notice_with_links['links'] = notice.get('links') or {}
     return jsonify({'success': True, 'notice': notice_with_links})
 
 
@@ -1748,11 +1802,20 @@ def admin_notice():
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     data = request.get_json() or {}
     text = str(data.get('text') or '').strip()
+    links = data.get('links') or {}
     if not text:
         return jsonify({'success': False, 'error': 'Mesaj bos'})
     if len(text) > MAX_NOTICE_TEXT_LENGTH:
         return jsonify({'success': False, 'error': 'Mesaj cok uzun'})
-    notice = {'id': datetime.now().strftime('%Y%m%d%H%M%S'), 'text': text, 'created_at': datetime.now().isoformat()}
+    notice = {
+        'id': datetime.now().strftime('%Y%m%d%H%M%S'),
+        'text': text,
+        'created_at': datetime.now().isoformat(),
+        'links': {
+            'telegram': str(links.get('telegram') or '').strip(),
+            'youtube': str(links.get('youtube') or '').strip()
+        }
+    }
     save_json(NOTICE_FILE, notice)
     licenses = load_json(LICENSES_FILE, {})
     for lid in licenses:
@@ -1774,6 +1837,7 @@ def admin_notice_user():
     uid = str(data.get('uid') or '').strip().lower()
     license_id = str(data.get('license_id') or '').strip()
     text = str(data.get('text') or '').strip()
+    links = data.get('links') or {}
     if not text or (not uid and not license_id):
         return jsonify({'success': False, 'error': 'Uid veya lisans ve mesaj gerekli'})
     if len(text) > MAX_NOTICE_TEXT_LENGTH:
@@ -1792,7 +1856,11 @@ def admin_notice_user():
         'id': datetime.now().strftime('%Y%m%d%H%M%S') + '_' + secrets.token_hex(3),
         'text': text,
         'created_at': datetime.now().isoformat(),
-        'scope': 'personal'
+        'scope': 'personal',
+        'links': {
+            'telegram': str(links.get('telegram') or '').strip(),
+            'youtube': str(links.get('youtube') or '').strip()
+        }
     }
     row['personal_notice'] = notice
     row['message_text'] = text
