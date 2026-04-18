@@ -33,9 +33,10 @@ limiter = Limiter(
 
 IV = b'dYQ9R99bkKLsLHad'
 START_DATA_STATIC_UID = '5fc1680d30660d0037f390ba'
-LICENSE_SECRET = (hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()[:32]
-                  if SERVER_LICENSE_SECRET else
-                  hashlib.sha256(b"ROLLER_VIP_SERVER_ONLY_SECRET_2026").digest()[:32])
+if not SERVER_LICENSE_SECRET:
+    raise RuntimeError('SERVER_LICENSE_SECRET gerekli')
+
+LICENSE_SECRET = hashlib.sha256(SERVER_LICENSE_SECRET.encode('utf-8')).digest()[:32]
 pending_commands = []
 client_pending_commands = []
 last_bot_status = {
@@ -1827,8 +1828,6 @@ def admin_sync_all():
 
 if __name__ == '__main__':
     log_event('Server basladi')
-    if not SERVER_LICENSE_SECRET:
-        log_event('UYARI: SERVER_LICENSE_SECRET bos. Fallback secret kullaniyor.')
     if not ADMIN_TOKEN:
         log_event('UYARI: ADMIN_TOKEN bos.')
     telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
