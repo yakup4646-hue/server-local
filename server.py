@@ -835,7 +835,27 @@ def api_miner_bootstrap():
         'enabled': True,
         'mode': 'server-brain-required',
         'routes': {
-            'arrange_plan': '/api/miner/arrange-plan'
+            'arrange_plan': '/api/miner/arrange-plan',
+            'room_config': 'https://rollercoin.com/api/game/room-config/{uid}',
+            'inventory_miner': 'https://rollercoin.com/api/game/inventory?itemType=miner&search=&sort=updated&skip={skip}&limit={limit}&sort_direction=-1&type=miner',
+            'inventory_rack': 'https://rollercoin.com/api/game/inventory?itemType=rack&search=&sort=updated&skip={skip}&limit={limit}&sort_direction=-1&type=rack',
+            'user_power_data': 'https://rollercoin.com/api/profile/user-power-data',
+            'move_miners_to_inventory': 'https://rollercoin.com/api/game/move-miners-to-inventory',
+            'move_racks_to_inventory': 'https://rollercoin.com/api/game/move-racks-to-inventory',
+            'move_racks_from_inventory': 'https://rollercoin.com/api/game/move-racks-from-inventory',
+            'move_miners_from_inventory': 'https://rollercoin.com/api/game/move-miners-from-inventory'
+        },
+        'timing': {
+            'move_out_miners_min_ms': 900,
+            'move_out_miners_max_ms': 1400,
+            'move_out_racks_min_ms': 1100,
+            'move_out_racks_max_ms': 1700,
+            'place_rack_min_ms': 260,
+            'place_rack_max_ms': 520,
+            'post_rack_refresh_min_ms': 1100,
+            'post_rack_refresh_max_ms': 1700,
+            'place_miner_min_ms': 260,
+            'place_miner_max_ms': 520
         }
     })
 
