@@ -6,6 +6,7 @@ import json
 import base64
 import hashlib
 import secrets
+import hmac
 import re
 import threading
 from datetime import datetime
@@ -56,6 +57,11 @@ REMOTE_STATE_KEYS = {
     str(REVOKED_LICENSES_FILE): 'revoked_licenses',
     str(QUICK_LINKS_FILE): 'quick_links',
 }
+MAX_LICENSE_KEY_LENGTH = 4096
+MAX_NOTICE_TEXT_LENGTH = 4000
+MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
+MAX_JSON_FIELD_LENGTH = 2000
+MAX_SESSIONS_PER_USER = 5
 
 
 def _supabase_enabled():
@@ -131,8 +137,18 @@ def log_event(event):
 
 
 def check_admin(req):
-    token = str(req.headers.get('X-Admin-Token') or req.args.get('admin_token') or '').strip()
-    return bool(ADMIN_TOKEN) and token == ADMIN_TOKEN
+    token = str(req.headers.get('X-Admin-Token') or '').strip()
+    return bool(ADMIN_TOKEN) and bool(token) and hmac.compare_digest(token, ADMIN_TOKEN)
+
+
+def secure_equals(left, right):
+    left = str(left or '')
+    right = str(right or '')
+    return bool(left) and bool(right) and hmac.compare_digest(left, right)
+
+
+def is_safe_text(value, max_len=MAX_JSON_FIELD_LENGTH):
+    return len(str(value or '').strip()) <= max_len
 
 
 def normalize_lang(lang):
@@ -996,7 +1012,10 @@ def api_miner_arrange_plan():
 
 
 def valid_session(user, token):
-    return any(str(s.get('token') or '').strip() == token for s in (user.get('sessions') or []))
+    token = str(token or '').strip()
+    if not token:
+        return False
+    return any(secure_equals(str(s.get('token') or '').strip(), token) for s in (user.get('sessions') or []))
 
 
 def get_latest_uid(users=None):
@@ -1035,6 +1054,12 @@ def api_auth():
 
     if not uid or not license_key:
         return jsonify({'success': False, 'error': 'Eksik bilgi'})
+    if len(license_key) > MAX_LICENSE_KEY_LENGTH:
+        return jsonify({'success': False, 'error': 'Lisans anahtari cok uzun'})
+    if not is_safe_text(name):
+        return jsonify({'success': False, 'error': 'Gecersiz isim'})
+    if not is_safe_text(incoming_client_id):
+        return jsonify({'success': False, 'error': 'Gecersiz client id'})
     if not re.match(r'^[a-f0-9]{24}$', uid, re.IGNORECASE):
         return jsonify({'success': False, 'error': 'Gecersiz UID'})
 
@@ -1110,6 +1135,7 @@ def api_auth():
         'fingerprint': fingerprint,
         'time': datetime.now().isoformat()
     })
+    users[uid]['sessions'] = (users[uid].get('sessions') or [])[-MAX_SESSIONS_PER_USER:]
 
     row['language'] = language
     row['last_login'] = datetime.now().isoformat()
@@ -1176,6 +1202,8 @@ def api_telegram_register():
     telegram_chat_id = str(data.get('telegram_chat_id') or '').strip()
     if not token or not uid or not telegram_token or not telegram_chat_id:
         return jsonify({'success': False, 'error': 'Eksik Telegram bilgisi'})
+    if not is_safe_text(telegram_token) or not is_safe_text(telegram_chat_id, 256):
+        return jsonify({'success': False, 'error': 'Telegram bilgisi gecersiz'})
 
     users = load_json(USERS_FILE, {})
     user = users.get(uid)
@@ -1383,6 +1411,8 @@ def api_telegram_screenshot():
     image = str(data.get('image') or '').strip()
     if not token or not uid or not image:
         return jsonify({'success': False, 'error': 'Eksik ekran bilgisi'})
+    if len(image) > MAX_SCREENSHOT_B64_LENGTH:
+        return jsonify({'success': False, 'error': 'Ekran verisi cok buyuk'})
     users = load_json(USERS_FILE, {})
     user = users.get(uid)
     if not user or not valid_session(user, token):
@@ -1610,6 +1640,8 @@ def admin_notice():
     text = str(data.get('text') or '').strip()
     if not text:
         return jsonify({'success': False, 'error': 'Mesaj bos'})
+    if len(text) > MAX_NOTICE_TEXT_LENGTH:
+        return jsonify({'success': False, 'error': 'Mesaj cok uzun'})
     notice = {'id': datetime.now().strftime('%Y%m%d%H%M%S'), 'text': text, 'created_at': datetime.now().isoformat()}
     save_json(NOTICE_FILE, notice)
     licenses = load_json(LICENSES_FILE, {})
@@ -1632,6 +1664,8 @@ def admin_notice_user():
     text = str(data.get('text') or '').strip()
     if not text or (not uid and not license_id):
         return jsonify({'success': False, 'error': 'Uid veya lisans ve mesaj gerekli'})
+    if len(text) > MAX_NOTICE_TEXT_LENGTH:
+        return jsonify({'success': False, 'error': 'Mesaj cok uzun'})
     users = load_json(USERS_FILE, {})
     licenses = load_json(LICENSES_FILE, {})
     if not license_id and uid:
@@ -1678,6 +1712,8 @@ def admin_bot_set():
     content = str(data.get('content') or '')
     if not content:
         return jsonify({'success': False, 'error': 'Bot icerigi bos'})
+    if len(content) > (2 * 1024 * 1024):
+        return jsonify({'success': False, 'error': 'Bot icerigi cok buyuk'})
     save_variant_bot_content(content, is_android)
     log_event(f"Admin bot guncelledi: {'android' if is_android else 'desktop'}")
     return jsonify({'success': True, 'variant': 'android' if is_android else 'desktop'})
@@ -1762,6 +1798,10 @@ def admin_sync_all():
 
 if __name__ == '__main__':
     log_event('Server basladi')
+    if not SERVER_LICENSE_SECRET:
+        log_event('UYARI: SERVER_LICENSE_SECRET bos. Fallback secret kullaniyor.')
+    if not ADMIN_TOKEN:
+        log_event('UYARI: ADMIN_TOKEN bos.')
     telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
     telegram_thread.start()
     app.run(host=HOST, port=PORT, debug=False)
