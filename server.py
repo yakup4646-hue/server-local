@@ -1540,11 +1540,23 @@ def api_client_command():
     return jsonify({'success': True, 'command': command})
 
 
-@app.route('/games', methods=['GET'])
-def api_games():
-    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
+@app.route('/api/bot/bootstrap-check', methods=['POST'])
+@limiter.limit("60 per minute")
+def api_bot_bootstrap_check():
+    data = request.get_json() or {}
+    _user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
     if bridge_error:
         return jsonify({'success': False, 'error': bridge_error}), 401
+    return jsonify({
+        'success': True,
+        'active': bool((row or {}).get('active', True)),
+        'uid': str((row or {}).get('uid') or '').strip().lower(),
+        'client_id': str((row or {}).get('client_id') or '').strip()
+    })
+
+
+@app.route('/games', methods=['GET'])
+def api_games():
     return jsonify(load_json(GAMES_FILE, {}))
 
 
