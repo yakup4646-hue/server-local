@@ -1202,6 +1202,8 @@ def validate_bot_bridge(req, data=None, require_uid=True):
     uid = meta['uid']
     if not meta['session_token'] or not meta['bot_token']:
         return None, None, None, 'script bridge gerekli'
+    if not meta['client_id']:
+        return None, None, None, 'client id gerekli'
 
     users = load_json(USERS_FILE, {})
     user = users.get(uid) if uid else None
@@ -1220,8 +1222,11 @@ def validate_bot_bridge(req, data=None, require_uid=True):
         return None, None, None, 'script bridge gerekli'
 
     expires_at = str(sess.get('bot_bridge_expires_at') or '').strip()
+    session_client_id = str(sess.get('client_id') or '').strip()
     if not secure_equals(str(sess.get('bot_bridge_token') or '').strip(), meta['bot_token']):
         return None, None, None, 'script bridge gerekli'
+    if not session_client_id or not secure_equals(session_client_id, meta['client_id']):
+        return None, None, None, 'script kimligi uyusmuyor'
     if expires_at:
         try:
             if datetime.now() > datetime.fromisoformat(expires_at):
@@ -1238,7 +1243,7 @@ def validate_bot_bridge(req, data=None, require_uid=True):
         return None, None, None, 'script gecersiz'
     if meta['uid'] and meta['uid'] != uid:
         return None, None, None, 'uid uyusmuyor'
-    if meta['client_id'] and row.get('client_id') and meta['client_id'] != row.get('client_id'):
+    if row.get('client_id') and not secure_equals(str(row.get('client_id') or '').strip(), meta['client_id']):
         return None, None, None, 'script kimligi uyusmuyor'
     if meta['script_hash'] and row.get('script_hash') and meta['script_hash'] != row.get('script_hash'):
         return None, None, None, 'script dogrulamasi basarisiz'
