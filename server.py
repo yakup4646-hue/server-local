@@ -679,6 +679,44 @@ def is_license_online(row, now=None):
         return False
 
 
+def is_recent_iso_time(value, seconds=600, now=None):
+    now = now or datetime.now()
+    text = str(value or '').strip()
+    if not text:
+        return False
+    try:
+        return (now - datetime.fromisoformat(text)).total_seconds() <= seconds
+    except Exception:
+        return False
+
+
+def validate_bot_client_id(req, require_online=True):
+    client_id = str(req.headers.get('X-VIP-Client-ID') or '').strip()
+    if not client_id:
+        return None, None, 'client id gerekli'
+    licenses = load_json(LICENSES_FILE, {})
+    matched_license_id = ''
+    matched_row = None
+    for lid, row in (licenses or {}).items():
+        if secure_equals(str((row or {}).get('client_id') or '').strip(), client_id):
+            matched_license_id = str(lid or '').strip()
+            matched_row = row or {}
+            break
+    if not matched_row:
+        return None, None, 'script kimligi uyusmuyor'
+    if not matched_row.get('active', True):
+        return None, None, 'off'
+    if not require_online:
+        return matched_license_id, matched_row, None
+    now = datetime.now()
+    uid = str(matched_row.get('uid') or '').strip().lower()
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid) if uid else {}
+    if is_license_online(matched_row, now) or is_recent_iso_time((user or {}).get('last_login'), 600, now):
+        return matched_license_id, matched_row, None
+    return None, None, 'script offline'
+
+
 def get_license_status_text(_license_row=None):
     st = last_bot_status or {}
     return (
@@ -1146,6 +1184,9 @@ def api_miner_bootstrap():
 @limiter.limit("30 per minute")
 def api_miner_arrange_plan():
     data = request.get_json() or {}
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
     room_data = data.get('room_data') or data.get('roomData') or {}
     if not uid:
@@ -1447,6 +1488,9 @@ def api_user_id_set():
 def api_encrypt():
     try:
         data = request.get_json() or {}
+        _license_id, _row, client_error = validate_bot_client_id(request, True)
+        if client_error:
+            return jsonify({'success': False, 'error': client_error}), 401
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
         if not uid:
             uid = get_latest_uid()
@@ -1468,6 +1512,9 @@ def api_encrypt():
 def api_encrypt_start():
     try:
         data = request.get_json() or {}
+        _license_id, _row, client_error = validate_bot_client_id(request, True)
+        if client_error:
+            return jsonify({'success': False, 'error': client_error}), 401
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
         start_data = data.get('start_data')
         if not uid:
@@ -1483,6 +1530,9 @@ def api_encrypt_start():
 @app.route('/notify', methods=['POST'])
 def api_notify():
     data = request.get_json() or {}
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     log_event(f"Notify: {json.dumps(data, ensure_ascii=False)[:500]}")
     return jsonify({'success': True, 'received': data})
 
@@ -1492,6 +1542,9 @@ def api_bot_status():
     global last_bot_status
     try:
         data = request.get_json() or {}
+        _license_id, _row, client_error = validate_bot_client_id(request, True)
+        if client_error:
+            return jsonify({'success': False, 'error': client_error}), 401
         last_bot_status = {
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'is_running': bool(data.get('is_running', False)),
@@ -1520,6 +1573,9 @@ def api_bot_status_get():
 
 @app.route('/bot/command', methods=['GET'])
 def api_bot_command_get():
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     command = pending_commands.pop(0) if pending_commands else None
     return jsonify({'success': True, 'command': command})
 
@@ -1540,6 +1596,9 @@ def api_bot_command_post():
 
 @app.route('/bot/command/ack', methods=['POST'])
 def api_bot_command_ack():
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     return jsonify({'success': True})
 
 
