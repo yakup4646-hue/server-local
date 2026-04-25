@@ -1488,9 +1488,6 @@ def api_user_id_set():
 def api_encrypt():
     try:
         data = request.get_json() or {}
-        _license_id, _row, client_error = validate_bot_client_id(request, True)
-        if client_error:
-            return jsonify({'success': False, 'error': client_error}), 401
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
         if not uid:
             uid = get_latest_uid()
@@ -1512,9 +1509,6 @@ def api_encrypt():
 def api_encrypt_start():
     try:
         data = request.get_json() or {}
-        _license_id, _row, client_error = validate_bot_client_id(request, True)
-        if client_error:
-            return jsonify({'success': False, 'error': client_error}), 401
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
         start_data = data.get('start_data')
         if not uid:
