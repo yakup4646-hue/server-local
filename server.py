@@ -239,6 +239,36 @@ def is_safe_text(value, max_len=MAX_JSON_FIELD_LENGTH):
     return len(str(value or '').strip()) <= max_len
 
 
+def require_bot_identity(req, allow_query_uid=False):
+    uid = str(req.headers.get('X-VIP-UID') or '').strip().lower()
+    session_token = str(req.headers.get('X-VIP-Session-Token') or '').strip()
+    client_id = str(req.headers.get('X-VIP-Client-ID') or '').strip()
+    script_hash = str(req.headers.get('X-VIP-Script-Hash') or '').strip()
+    if allow_query_uid and not uid:
+        uid = str(req.args.get('uid') or '').strip().lower()
+    if not uid or not session_token or not client_id:
+        return None, (jsonify({'success': False, 'error': 'yetkisiz bot'}), 401)
+
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, session_token):
+        return None, (jsonify({'success': False, 'error': 'yetkisiz bot'}), 401)
+
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+    if not row or not row.get('active', True):
+        return None, (jsonify({'success': False, 'error': 'off'}), 401)
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return None, (jsonify({'success': False, 'error': 'script gecersiz'}), 401)
+    if str(row.get('client_id') or '').strip() != client_id:
+        return None, (jsonify({'success': False, 'error': 'script kimligi uyusmuyor'}), 401)
+    expected_hash = str(row.get('script_hash') or '').strip()
+    if expected_hash and script_hash and script_hash != expected_hash:
+        return None, (jsonify({'success': False, 'error': 'script dogrulamasi basarisiz'}), 401)
+    return {'uid': uid, 'user': user, 'license_id': license_id, 'license': row}, None
+
+
 def normalize_lang(lang):
     lang = str(lang or 'tr').strip().lower()
     return {'tr': 'tr', 'en': 'en', 'pr': 'pr', 'pt': 'pr'}.get(lang, 'tr')
@@ -1442,6 +1472,9 @@ def api_bot_bootstrap_check():
 
 @app.route('/games', methods=['GET'])
 def api_games():
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     return jsonify(normalize_games_map(load_json(GAMES_FILE, {})))
 
 
@@ -1502,18 +1535,26 @@ def api_encrypt_start():
 
 @app.route('/notify', methods=['POST'])
 def api_notify():
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     data = request.get_json() or {}
-    log_event(f"Notify: {json.dumps(data, ensure_ascii=False)[:500]}")
+    log_event(f"Notify[{bot_auth['uid'][:8]}]: {json.dumps(data, ensure_ascii=False)[:500]}")
     return jsonify({'success': True, 'received': data})
 
 
 @app.route('/bot/status', methods=['POST'])
 def api_bot_status():
     global last_bot_status
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     try:
         data = request.get_json() or {}
         last_bot_status = {
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'uid': bot_auth['uid'],
+            'license_id': bot_auth['license_id'],
             'is_running': bool(data.get('is_running', False)),
             'is_paused': bool(data.get('is_paused', False)),
             'is_playing': bool(data.get('is_playing', False)),
@@ -1540,8 +1581,11 @@ def api_bot_status_get():
 
 @app.route('/bot/command', methods=['GET'])
 def api_bot_command_get():
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     command = pending_commands.pop(0) if pending_commands else None
-    return jsonify({'success': True, 'command': command})
+    return jsonify({'success': True, 'command': command, 'uid': bot_auth['uid']})
 
 
 @app.route('/bot/command', methods=['POST'])
@@ -1560,7 +1604,10 @@ def api_bot_command_post():
 
 @app.route('/bot/command/ack', methods=['POST'])
 def api_bot_command_ack():
-    return jsonify({'success': True})
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
+    return jsonify({'success': True, 'uid': bot_auth['uid']})
 
 
 @app.route('/api/notice/ack', methods=['POST'])
