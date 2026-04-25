@@ -71,6 +71,7 @@ MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
 MAX_SESSIONS_PER_USER = 5
+BOT_BRIDGE_TTL_SECONDS = 6 * 60 * 60
 SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
 SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
@@ -1112,6 +1113,9 @@ def build_miner_plan_payload(room_data):
 
 @app.route('/api/miner/bootstrap', methods=['GET'])
 def api_miner_bootstrap():
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     return jsonify({
         'success': True,
         'enabled': True,
@@ -1146,7 +1150,10 @@ def api_miner_bootstrap():
 @limiter.limit("30 per minute")
 def api_miner_arrange_plan():
     data = request.get_json() or {}
-    uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
+    uid = str(request.headers.get('X-VIP-UID') or data.get('uid') or data.get('user_id') or '').strip().lower()
     room_data = data.get('room_data') or data.get('roomData') or {}
     if not uid:
         return jsonify({'success': False, 'error': 'uid gerekli'})
@@ -1166,6 +1173,81 @@ def valid_session(user, token):
     if not token:
         return False
     return any(secure_equals(str(s.get('token') or '').strip(), token) for s in (user.get('sessions') or []))
+
+
+def get_session_row(user, token):
+    token = str(token or '').strip()
+    if not token:
+        return None
+    for sess in (user.get('sessions') or []):
+        if secure_equals(str(sess.get('token') or '').strip(), token):
+            return sess
+    return None
+
+
+def issue_bot_bridge_token():
+    return secrets.token_urlsafe(32)
+
+
+def get_bridge_request_meta(req, data=None):
+    data = data or {}
+    return {
+        'uid': str(req.headers.get('X-VIP-UID') or data.get('uid') or data.get('user_id') or '').strip().lower(),
+        'session_token': str(req.headers.get('X-VIP-Session-Token') or '').strip(),
+        'client_id': str(req.headers.get('X-VIP-Client-ID') or '').strip(),
+        'script_hash': str(req.headers.get('X-VIP-Script-Hash') or '').strip(),
+        'bot_token': str(req.headers.get('X-VIP-Bot-Token') or '').strip(),
+    }
+
+
+def validate_bot_bridge(req, data=None, require_uid=True):
+    meta = get_bridge_request_meta(req, data)
+    uid = meta['uid']
+    if require_uid and not uid:
+        return None, None, None, 'uid gerekli'
+    if not meta['session_token'] or not meta['bot_token']:
+        return None, None, None, 'script bridge gerekli'
+
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid) if uid else None
+    sess = get_session_row(user, meta['session_token']) if user else None
+
+    if not user or not sess:
+        for maybe_uid, maybe_user in users.items():
+            maybe_sess = get_session_row(maybe_user, meta['session_token'])
+            if maybe_sess:
+                user = maybe_user
+                sess = maybe_sess
+                uid = str(maybe_uid or '').strip().lower()
+                break
+
+    if not user or not sess:
+        return None, None, None, 'script bridge gerekli'
+
+    expires_at = str(sess.get('bot_bridge_expires_at') or '').strip()
+    if not secure_equals(str(sess.get('bot_bridge_token') or '').strip(), meta['bot_token']):
+        return None, None, None, 'script bridge gerekli'
+    if expires_at:
+        try:
+            if datetime.now() > datetime.fromisoformat(expires_at):
+                return None, None, None, 'script bridge suresi doldu'
+        except Exception:
+            return None, None, None, 'script bridge gecersiz'
+
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '')
+    if not row or not row.get('active', True):
+        return None, None, None, 'off'
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return None, None, None, 'script gecersiz'
+    if meta['uid'] and meta['uid'] != uid:
+        return None, None, None, 'uid uyusmuyor'
+    if meta['client_id'] and row.get('client_id') and meta['client_id'] != row.get('client_id'):
+        return None, None, None, 'script kimligi uyusmuyor'
+    if meta['script_hash'] and row.get('script_hash') and meta['script_hash'] != row.get('script_hash'):
+        return None, None, None, 'script dogrulamasi basarisiz'
+    return user, row, sess, None
 
 
 def get_latest_uid(users=None):
@@ -1275,6 +1357,8 @@ def api_auth():
         users.pop(bound_uid, None)
 
     session_token = secrets.token_hex(16)
+    bot_bridge_token = issue_bot_bridge_token()
+    bot_bridge_expires_at = datetime.now().timestamp() + BOT_BRIDGE_TTL_SECONDS
     if uid not in users:
         users[uid] = {
             'uid': uid,
@@ -1291,7 +1375,11 @@ def api_auth():
     users[uid].setdefault('sessions', []).append({
         'token': session_token,
         'fingerprint': fingerprint,
-        'time': datetime.now().isoformat()
+        'time': datetime.now().isoformat(),
+        'bot_bridge_token': bot_bridge_token,
+        'bot_bridge_expires_at': datetime.fromtimestamp(bot_bridge_expires_at).isoformat(),
+        'client_id': client_id,
+        'script_hash': str(row.get('script_hash') or incoming_hash or '')
     })
     users[uid]['sessions'] = (users[uid].get('sessions') or [])[-MAX_SESSIONS_PER_USER:]
 
@@ -1313,6 +1401,10 @@ def api_auth():
         'language': language,
         'quick_links': load_quick_links(),
         'android_mode': android_mode,
+        'bot_bridge': {
+            'bot_token': bot_bridge_token,
+            'expires_at': datetime.fromtimestamp(bot_bridge_expires_at).isoformat()
+        }
     }
     if bot_code:
         payload['bot_code'] = encrypt_bot_for_uid(bot_code, uid)
@@ -1412,6 +1504,9 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     return jsonify(normalize_games_map(load_json(GAMES_FILE, {})))
 
 
@@ -1437,9 +1532,10 @@ def api_user_id_set():
 def api_encrypt():
     try:
         data = request.get_json() or {}
-        uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
-        if not uid:
-            uid = get_latest_uid()
+        _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+        if bridge_error:
+            return jsonify({'success': False, 'error': bridge_error}), 401
+        uid = str(request.headers.get('X-VIP-UID') or data.get('uid') or data.get('user_id') or '').strip().lower()
         if not uid:
             return jsonify({'success': False, 'error': 'uid gerekli'})
         payload = {
@@ -1458,7 +1554,10 @@ def api_encrypt():
 def api_encrypt_start():
     try:
         data = request.get_json() or {}
-        uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
+        _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+        if bridge_error:
+            return jsonify({'success': False, 'error': bridge_error}), 401
+        uid = str(request.headers.get('X-VIP-UID') or data.get('uid') or data.get('user_id') or '').strip().lower()
         start_data = data.get('start_data')
         if not uid:
             return jsonify({'success': False, 'error': 'uid gerekli'})
@@ -1473,6 +1572,9 @@ def api_encrypt_start():
 @app.route('/notify', methods=['POST'])
 def api_notify():
     data = request.get_json() or {}
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=False)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     log_event(f"Notify: {json.dumps(data, ensure_ascii=False)[:500]}")
     return jsonify({'success': True, 'received': data})
 
@@ -1482,6 +1584,9 @@ def api_bot_status():
     global last_bot_status
     try:
         data = request.get_json() or {}
+        _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=False)
+        if bridge_error:
+            return jsonify({'success': False, 'error': bridge_error}), 401
         last_bot_status = {
             'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'is_running': bool(data.get('is_running', False)),
@@ -1510,12 +1615,17 @@ def api_bot_status_get():
 
 @app.route('/bot/command', methods=['GET'])
 def api_bot_command_get():
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     command = pending_commands.pop(0) if pending_commands else None
     return jsonify({'success': True, 'command': command})
 
 
 @app.route('/bot/command', methods=['POST'])
 def api_bot_command_post():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     data = request.get_json() or {}
     command = str(data.get('command') or '').strip().lower()
     if command not in {'start','stop','reset','refresh','full_clean','status','menu','games','reset_stats'}:
@@ -1530,6 +1640,10 @@ def api_bot_command_post():
 
 @app.route('/bot/command/ack', methods=['POST'])
 def api_bot_command_ack():
+    data = request.get_json() or {}
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=False)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     return jsonify({'success': True})
 
 
