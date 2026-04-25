@@ -1455,16 +1455,28 @@ def api_auth():
 @limiter.limit("120 per minute")
 def api_heartbeat():
     data = request.get_json() or {}
-    _user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
-    if bridge_error:
-        return jsonify({'success': False, 'error': bridge_error}), 401
-    incoming_hash = str(request.headers.get('X-VIP-Script-Hash') or data.get('script_hash') or '').strip()
-    if row.get('script_hash') and incoming_hash and not secure_equals(incoming_hash, str(row.get('script_hash') or '').strip()):
-        return jsonify({'success': False, 'error': 'off'}), 401
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    incoming_client_id = str(data.get('client_id') or '').strip()
+    incoming_hash = str(data.get('script_hash') or '').strip()
+    if not token or not uid:
+        return jsonify({'success': False, 'error': 'Eksik heartbeat'})
+
+    users = load_json(USERS_FILE, {})
     licenses = load_json(LICENSES_FILE, {})
-    license_id = str((row or {}).get('license_id') or '').strip()
-    if not license_id:
-        return jsonify({'success': False, 'error': 'Lisans bulunamadi'}), 404
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'off'})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '')
+    if not row or not row.get('active', True):
+        return jsonify({'success': False, 'error': 'off'})
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'invalid uid'})
+    if row.get('client_id') and incoming_client_id and incoming_client_id != row.get('client_id'):
+        return jsonify({'success': False, 'error': 'off'})
+    if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
+        return jsonify({'success': False, 'error': 'off'})
     row['last_heartbeat'] = datetime.now().isoformat()
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
@@ -1475,20 +1487,24 @@ def api_heartbeat():
 @limiter.limit("10 per minute")
 def api_telegram_register():
     data = request.get_json() or {}
-    _user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
-    if bridge_error:
-        return jsonify({'success': False, 'error': bridge_error}), 401
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
     telegram_token = str(data.get('telegram_token') or '').strip()
     telegram_chat_id = str(data.get('telegram_chat_id') or '').strip()
-    if not telegram_token or not telegram_chat_id:
+    if not token or not uid or not telegram_token or not telegram_chat_id:
         return jsonify({'success': False, 'error': 'Eksik Telegram bilgisi'})
     if not is_safe_text(telegram_token) or not is_safe_text(telegram_chat_id, 256):
         return jsonify({'success': False, 'error': 'Telegram bilgisi gecersiz'})
 
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
     licenses = load_json(LICENSES_FILE, {})
-    license_id = str((row or {}).get('license_id') or '').strip()
-    if not license_id:
-        return jsonify({'success': False, 'error': 'Lisans bulunamadi'}), 404
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '')
+    if not row:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
 
     ok, resp = send_telegram_api(telegram_token, 'getMe', {})
     if not ok:
@@ -1507,9 +1523,19 @@ def api_telegram_register():
 @limiter.limit("120 per minute")
 def api_client_command():
     data = request.get_json() or {}
-    _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
-    if bridge_error:
-        return jsonify({'success': False, 'error': bridge_error}), 401
+    token = str(data.get('token') or '').strip()
+    uid = str(data.get('uid') or '').strip().lower()
+    if not token or not uid:
+        return jsonify({'success': False, 'error': 'Eksik bilgi'})
+    users = load_json(USERS_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
+    licenses = load_json(LICENSES_FILE, {})
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'Script gecersiz'})
     command = client_pending_commands.pop(0) if client_pending_commands else None
     return jsonify({'success': True, 'command': command})
 
