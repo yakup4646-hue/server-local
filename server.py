@@ -1455,28 +1455,16 @@ def api_auth():
 @limiter.limit("120 per minute")
 def api_heartbeat():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
-    incoming_client_id = str(data.get('client_id') or '').strip()
-    incoming_hash = str(data.get('script_hash') or '').strip()
-    if not token or not uid:
-        return jsonify({'success': False, 'error': 'Eksik heartbeat'})
-
-    users = load_json(USERS_FILE, {})
+    _user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
+    incoming_hash = str(request.headers.get('X-VIP-Script-Hash') or data.get('script_hash') or '').strip()
+    if row.get('script_hash') and incoming_hash and not secure_equals(incoming_hash, str(row.get('script_hash') or '').strip()):
+        return jsonify({'success': False, 'error': 'off'}), 401
     licenses = load_json(LICENSES_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'off'})
-    license_id = user.get('license_id')
-    row = licenses.get(license_id or '')
-    if not row or not row.get('active', True):
-        return jsonify({'success': False, 'error': 'off'})
-    if str(row.get('uid') or '').strip().lower() != uid:
-        return jsonify({'success': False, 'error': 'invalid uid'})
-    if row.get('client_id') and incoming_client_id and incoming_client_id != row.get('client_id'):
-        return jsonify({'success': False, 'error': 'off'})
-    if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
-        return jsonify({'success': False, 'error': 'off'})
+    license_id = str((row or {}).get('license_id') or '').strip()
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'}), 404
     row['last_heartbeat'] = datetime.now().isoformat()
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
@@ -1487,24 +1475,20 @@ def api_heartbeat():
 @limiter.limit("10 per minute")
 def api_telegram_register():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
+    _user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     telegram_token = str(data.get('telegram_token') or '').strip()
     telegram_chat_id = str(data.get('telegram_chat_id') or '').strip()
-    if not token or not uid or not telegram_token or not telegram_chat_id:
+    if not telegram_token or not telegram_chat_id:
         return jsonify({'success': False, 'error': 'Eksik Telegram bilgisi'})
     if not is_safe_text(telegram_token) or not is_safe_text(telegram_chat_id, 256):
         return jsonify({'success': False, 'error': 'Telegram bilgisi gecersiz'})
 
-    users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
     licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
-    row = licenses.get(license_id or '')
-    if not row:
-        return jsonify({'success': False, 'error': 'Lisans bulunamadi'})
+    license_id = str((row or {}).get('license_id') or '').strip()
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'}), 404
 
     ok, resp = send_telegram_api(telegram_token, 'getMe', {})
     if not ok:
@@ -1523,19 +1507,9 @@ def api_telegram_register():
 @limiter.limit("120 per minute")
 def api_client_command():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
-    if not token or not uid:
-        return jsonify({'success': False, 'error': 'Eksik bilgi'})
-    users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
-    licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
-    row = licenses.get(license_id or '') or {}
-    if str(row.get('uid') or '').strip().lower() != uid:
-        return jsonify({'success': False, 'error': 'Script gecersiz'})
+    _user, _row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     command = client_pending_commands.pop(0) if client_pending_commands else None
     return jsonify({'success': True, 'command': command})
 
@@ -1694,28 +1668,30 @@ def api_bot_command_ack():
 @app.route('/api/notice/ack', methods=['POST'])
 def api_notice_ack():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
+    user, licenses_row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     notice_id = str(data.get('notice_id') or '').strip()
-    if not token or not uid or not notice_id:
+    if not notice_id:
         return jsonify({'success': False, 'error': 'Eksik ack bilgisi'})
+    uid = str((user or {}).get('uid') or '').strip().lower()
+    if not uid:
+        return jsonify({'success': False, 'error': 'uid gerekli'}), 401
     users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
-    user.setdefault('seen_notice_ids', [])
-    if notice_id not in user['seen_notice_ids']:
-        user['seen_notice_ids'].append(notice_id)
-    user.setdefault('seen_personal_notice_ids', [])
-    if notice_id not in user['seen_personal_notice_ids']:
-        user['seen_personal_notice_ids'].append(notice_id)
-    user['delivered_notice_ids'] = [x for x in (user.get('delivered_notice_ids') or []) if x != notice_id]
-    user['delivered_personal_notice_ids'] = [x for x in (user.get('delivered_personal_notice_ids') or []) if x != notice_id]
-    user['personal_notice'] = {}
-    users[uid] = user
+    stored_user = users.get(uid) or user
+    stored_user.setdefault('seen_notice_ids', [])
+    if notice_id not in stored_user['seen_notice_ids']:
+        stored_user['seen_notice_ids'].append(notice_id)
+    stored_user.setdefault('seen_personal_notice_ids', [])
+    if notice_id not in stored_user['seen_personal_notice_ids']:
+        stored_user['seen_personal_notice_ids'].append(notice_id)
+    stored_user['delivered_notice_ids'] = [x for x in (stored_user.get('delivered_notice_ids') or []) if x != notice_id]
+    stored_user['delivered_personal_notice_ids'] = [x for x in (stored_user.get('delivered_personal_notice_ids') or []) if x != notice_id]
+    stored_user['personal_notice'] = {}
+    users[uid] = stored_user
     save_json(USERS_FILE, users)
     licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
+    license_id = str((licenses_row or {}).get('license_id') or stored_user.get('license_id') or '').strip()
     if license_id in licenses and str(licenses[license_id].get('message_id') or '') == notice_id:
         licenses[license_id]['message_status'] = 'Okundu'
         licenses[license_id]['personal_notice'] = {}
@@ -1727,25 +1703,20 @@ def api_notice_ack():
 @limiter.limit("10 per minute")
 def api_telegram_screenshot():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
+    user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
     image = str(data.get('image') or '').strip()
-    if not token or not uid or not image:
+    if not image:
         return jsonify({'success': False, 'error': 'Eksik ekran bilgisi'})
     if len(image) > MAX_SCREENSHOT_B64_LENGTH:
         return jsonify({'success': False, 'error': 'Ekran verisi cok buyuk'})
-    users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
-    licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
-    row = licenses.get(license_id or '') or {}
-    if str(row.get('uid') or '').strip().lower() != uid:
-        return jsonify({'success': False, 'error': 'Script gecersiz'})
+    license_id = str((row or {}).get('license_id') or '').strip()
+    if not license_id:
+        return jsonify({'success': False, 'error': 'Lisans bulunamadi'}), 404
     tg_token = str(row.get('telegram_token') or '').strip()
     tg_chat = str(row.get('telegram_chat_id') or '').strip()
-    lang = str(row.get('language') or user.get('language') or 'tr').strip().lower()
+    lang = str(row.get('language') or (user or {}).get('language') or 'tr').strip().lower()
     if not tg_token or not tg_chat:
         return jsonify({'success': False, 'error': 'Telegram bagli degil'})
     allowed, limit_state, retry_at = check_screenshot_rate_limit(license_id)
@@ -1778,28 +1749,25 @@ def api_telegram_screenshot():
 @limiter.limit("60 per minute")
 def api_notice_next():
     data = request.get_json() or {}
-    token = str(data.get('token') or '').strip()
-    uid = str(data.get('uid') or '').strip().lower()
-    if not token or not uid:
-        return jsonify({'success': False, 'error': 'Eksik uid'})
+    user, row, _sess, bridge_error = validate_bot_bridge(request, data, require_uid=True)
+    if bridge_error:
+        return jsonify({'success': False, 'error': bridge_error}), 401
+
+    uid = str((user or {}).get('uid') or '').strip().lower()
+    if not uid:
+        return jsonify({'success': False, 'error': 'uid gerekli'}), 401
     users = load_json(USERS_FILE, {})
-    user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'Gecersiz oturum'})
-
+    stored_user = users.get(uid) or user
     licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
-    row = licenses.get(license_id or '') or {}
-    if str(row.get('uid') or '').strip().lower() != uid:
-        return jsonify({'success': False, 'error': 'Script gecersiz'})
+    license_id = str((row or {}).get('license_id') or stored_user.get('license_id') or '').strip()
 
-    personal = (row.get('personal_notice') or user.get('personal_notice') or {})
+    personal = (row.get('personal_notice') or stored_user.get('personal_notice') or {})
     if personal.get('id') and personal.get('text'):
-        seen_personal = user.get('seen_personal_notice_ids', []) or []
-        delivered_personal = user.get('delivered_personal_notice_ids', []) or []
+        seen_personal = stored_user.get('seen_personal_notice_ids', []) or []
+        delivered_personal = stored_user.get('delivered_personal_notice_ids', []) or []
         if personal['id'] not in seen_personal and personal['id'] not in delivered_personal:
-            user.setdefault('delivered_personal_notice_ids', []).append(personal['id'])
-            users[uid] = user
+            stored_user.setdefault('delivered_personal_notice_ids', []).append(personal['id'])
+            users[uid] = stored_user
             save_json(USERS_FILE, users)
             if license_id in licenses:
                 licenses[license_id]['message_status'] = 'Gonderildi'
@@ -1813,19 +1781,17 @@ def api_notice_next():
     notice = load_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': ''})
     if not notice.get('id') or not notice.get('text'):
         return jsonify({'success': True, 'notice': None})
-    seen = user.get('seen_notice_ids', []) or []
-    delivered = user.get('delivered_notice_ids', []) or []
+    seen = stored_user.get('seen_notice_ids', []) or []
+    delivered = stored_user.get('delivered_notice_ids', []) or []
     if notice['id'] in seen or notice['id'] in delivered:
         return jsonify({'success': True, 'notice': None})
-    user.setdefault('delivered_notice_ids', []).append(notice['id'])
-    licenses = load_json(LICENSES_FILE, {})
-    license_id = user.get('license_id')
+    stored_user.setdefault('delivered_notice_ids', []).append(notice['id'])
     if license_id in licenses:
         licenses[license_id]['message_status'] = 'Gonderildi'
         licenses[license_id]['message_text'] = notice.get('text', '')
         licenses[license_id]['message_id'] = notice.get('id', '')
         save_json(LICENSES_FILE, licenses)
-    users[uid] = user
+    users[uid] = stored_user
     save_json(USERS_FILE, users)
     notice_with_links = dict(notice)
     notice_with_links['links'] = notice.get('links') or {}
