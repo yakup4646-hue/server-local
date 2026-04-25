@@ -1504,7 +1504,7 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
-    return jsonify(normalize_games_map(load_json(GAMES_FILE, {})))
+    return jsonify(load_json(GAMES_FILE, {}))
 
 
 @app.route('/user_id', methods=['GET'])
