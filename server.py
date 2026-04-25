@@ -1306,6 +1306,11 @@ def api_auth():
         bot_code = apply_android_bot_patch(bot_code)
     if bot_code:
         bot_code = patch_bot_content(bot_code)
+        bot_code = bot_code.replace('__VIP_SCRIPT_CLIENT_ID__', client_id or '')
+        bot_code = bot_code.replace('__VIP_SCRIPT_HASH__', str(row.get('script_hash') or incoming_hash or ''))
+        bot_code = bot_code.replace('__VIP_SCRIPT_SESSION__', session_token)
+        bot_code = bot_code.replace('__VIP_SCRIPT_BOT_TOKEN__', '')
+        bot_code = bot_code.replace('__VIP_SCRIPT_UID__', uid)
     payload = {
         'success': True,
         'session_token': session_token,
@@ -1408,6 +1413,31 @@ def api_client_command():
         return jsonify({'success': False, 'error': 'Script gecersiz'})
     command = client_pending_commands.pop(0) if client_pending_commands else None
     return jsonify({'success': True, 'command': command})
+
+
+@app.route('/api/bot/bootstrap-check', methods=['POST'])
+@limiter.limit("60 per minute")
+def api_bot_bootstrap_check():
+    data = request.get_json() or {}
+    uid = str(request.headers.get('X-VIP-UID') or data.get('uid') or '').strip().lower()
+    session_token = str(request.headers.get('X-VIP-Session-Token') or '').strip()
+    client_id = str(request.headers.get('X-VIP-Client-ID') or '').strip()
+    if not uid or not session_token or not client_id:
+        return jsonify({'success': False, 'error': 'kimlik eksik'}), 401
+    users = load_json(USERS_FILE, {})
+    licenses = load_json(LICENSES_FILE, {})
+    user = users.get(uid)
+    if not user or not valid_session(user, session_token):
+        return jsonify({'success': False, 'error': 'gecersiz oturum'}), 401
+    license_id = user.get('license_id')
+    row = licenses.get(license_id or '') or {}
+    if not row or not row.get('active', True):
+        return jsonify({'success': False, 'error': 'off'}), 401
+    if str(row.get('uid') or '').strip().lower() != uid:
+        return jsonify({'success': False, 'error': 'script gecersiz'}), 401
+    if str(row.get('client_id') or '').strip() != client_id:
+        return jsonify({'success': False, 'error': 'script kimligi uyusmuyor'}), 401
+    return jsonify({'success': True, 'uid': uid, 'client_id': client_id})
 
 
 @app.route('/games', methods=['GET'])
