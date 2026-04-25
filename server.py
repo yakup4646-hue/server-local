@@ -1150,6 +1150,9 @@ def build_miner_plan_payload(room_data):
 
 @app.route('/api/miner/bootstrap', methods=['GET'])
 def api_miner_bootstrap():
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     return jsonify({
         'success': True,
         'enabled': True,
@@ -1463,6 +1466,9 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
+    _license_id, _row, client_error = validate_bot_client_id(request, True)
+    if client_error:
+        return jsonify({'success': False, 'error': client_error}), 401
     return jsonify(load_json(GAMES_FILE, {}))
 
 
