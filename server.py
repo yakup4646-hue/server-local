@@ -1142,10 +1142,14 @@ def build_miner_plan_payload(room_data):
 
 @app.route('/api/miner/bootstrap', methods=['GET'])
 def api_miner_bootstrap():
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     return jsonify({
         'success': True,
         'enabled': True,
         'mode': 'server-brain-required',
+        'uid': bot_auth['uid'],
         'routes': {
             'arrange_plan': '/api/miner/arrange-plan',
             'room_config': 'https://rollercoin.com/api/game/room-config/{uid}',
@@ -1175,11 +1179,16 @@ def api_miner_bootstrap():
 @app.route('/api/miner/arrange-plan', methods=['POST'])
 @limiter.limit("30 per minute")
 def api_miner_arrange_plan():
+    bot_auth, error = require_bot_identity(request)
+    if error:
+        return error
     data = request.get_json() or {}
     uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
     room_data = data.get('room_data') or data.get('roomData') or {}
     if not uid:
         return jsonify({'success': False, 'error': 'uid gerekli'})
+    if uid != bot_auth['uid']:
+        return jsonify({'success': False, 'error': 'uid uyusmuyor'}), 401
     if not isinstance(room_data, dict) or not isinstance(room_data.get('racks') or [], list):
         return jsonify({'success': False, 'error': 'room_data gerekli'})
     try:
