@@ -1449,6 +1449,8 @@ def api_encrypt():
         data = request.get_json() or {}
         uid = str(data.get('uid') or data.get('user_id') or '').strip().lower()
         if not uid:
+            uid = get_latest_uid()
+        if not uid:
             return jsonify({'success': False, 'error': 'uid gerekli'})
         payload = {
             'power': int(data['power']),
