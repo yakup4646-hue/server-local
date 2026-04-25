@@ -1466,9 +1466,6 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
-    _license_id, _row, client_error = validate_bot_client_id(request, True)
-    if client_error:
-        return jsonify({'success': False, 'error': client_error}), 401
     return jsonify(load_json(GAMES_FILE, {}))
 
 
