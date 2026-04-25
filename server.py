@@ -1203,8 +1203,6 @@ def get_bridge_request_meta(req, data=None):
 def validate_bot_bridge(req, data=None, require_uid=True):
     meta = get_bridge_request_meta(req, data)
     uid = meta['uid']
-    if require_uid and not uid:
-        return None, None, None, 'uid gerekli'
     if not meta['session_token'] or not meta['bot_token']:
         return None, None, None, 'script bridge gerekli'
 
