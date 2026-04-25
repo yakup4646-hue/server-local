@@ -1113,9 +1113,6 @@ def build_miner_plan_payload(room_data):
 
 @app.route('/api/miner/bootstrap', methods=['GET'])
 def api_miner_bootstrap():
-    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
-    if bridge_error:
-        return jsonify({'success': False, 'error': bridge_error}), 401
     return jsonify({
         'success': True,
         'enabled': True,
@@ -1502,9 +1499,6 @@ def api_client_command():
 
 @app.route('/games', methods=['GET'])
 def api_games():
-    _user, _row, _sess, bridge_error = validate_bot_bridge(request, {}, require_uid=True)
-    if bridge_error:
-        return jsonify({'success': False, 'error': bridge_error}), 401
     return jsonify(normalize_games_map(load_json(GAMES_FILE, {})))
 
 
