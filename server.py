@@ -20,7 +20,8 @@ from urllib.parse import quote
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
-    HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY, ALLOWED_ORIGINS,
+    HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY,
+    SUPABASE_BACKUP_URL, SUPABASE_BACKUP_SERVICE_KEY, ALLOWED_ORIGINS,
     USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, BOT_ANDROID_FILE, GAMES_FILE, REVOKED_LICENSES_FILE, QUICK_LINKS_FILE
 )
 
@@ -78,52 +79,73 @@ SCREENSHOT_VIOLATION_THRESHOLD = 3
 screenshot_rate_state = {}
 
 
+def _supabase_targets():
+    targets = []
+    seen = set()
+    for name, url, key in (
+        ('primary', SUPABASE_URL, SUPABASE_SERVICE_KEY),
+        ('backup', SUPABASE_BACKUP_URL, SUPABASE_BACKUP_SERVICE_KEY),
+    ):
+        url = str(url or '').strip().rstrip('/')
+        key = str(key or '').strip()
+        if not url or not key or url in seen:
+            continue
+        seen.add(url)
+        targets.append({'name': name, 'url': url, 'key': key})
+    return targets
+
+
 def _supabase_enabled():
-    return bool(SUPABASE_URL and SUPABASE_SERVICE_KEY)
+    return bool(_supabase_targets())
 
 
-def _supabase_headers():
+def _supabase_headers(service_key):
     return {
-        'apikey': SUPABASE_SERVICE_KEY,
-        'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
+        'apikey': service_key,
+        'Authorization': f'Bearer {service_key}',
         'Content-Type': 'application/json'
     }
 
 
 def _supabase_get_state(state_key, default):
-    if not _supabase_enabled():
+    targets = _supabase_targets()
+    if not targets:
         return default
-    try:
-        url = f"{SUPABASE_URL}/rest/v1/app_state?key=eq.{quote(state_key)}&select=value"
-        req = urlrequest.Request(url, headers=_supabase_headers(), method='GET')
-        with urlrequest.urlopen(req, timeout=20) as resp:
-            rows = json.loads(resp.read().decode('utf-8'))
-        if rows and isinstance(rows, list):
-            return rows[0].get('value', default)
-    except Exception as e:
-        log_event(f'Supabase load error ({state_key}): {e}')
+    for target in targets:
+        try:
+            url = f"{target['url']}/rest/v1/app_state?key=eq.{quote(state_key)}&select=value"
+            req = urlrequest.Request(url, headers=_supabase_headers(target['key']), method='GET')
+            with urlrequest.urlopen(req, timeout=20) as resp:
+                rows = json.loads(resp.read().decode('utf-8'))
+            if rows and isinstance(rows, list):
+                return rows[0].get('value', default)
+        except Exception as e:
+            log_event(f"Supabase load error [{target['name']}] ({state_key}): {e}")
     return default
 
 
 def _supabase_set_state(state_key, value):
-    if not _supabase_enabled():
+    targets = _supabase_targets()
+    if not targets:
         return False
-    try:
-        body = json.dumps({
-            'key': state_key,
-            'value': value,
-            'updated_at': datetime.now().isoformat()
-        }).encode('utf-8')
-        headers = _supabase_headers()
-        headers['Prefer'] = 'resolution=merge-duplicates'
-        url = f"{SUPABASE_URL}/rest/v1/app_state?on_conflict=key"
-        req = urlrequest.Request(url, data=body, headers=headers, method='POST')
-        with urlrequest.urlopen(req, timeout=20) as resp:
-            resp.read()
-        return True
-    except Exception as e:
-        log_event(f'Supabase save error ({state_key}): {e}')
-        return False
+    body = json.dumps({
+        'key': state_key,
+        'value': value,
+        'updated_at': datetime.now().isoformat()
+    }).encode('utf-8')
+    saved_any = False
+    for target in targets:
+        try:
+            headers = _supabase_headers(target['key'])
+            headers['Prefer'] = 'resolution=merge-duplicates'
+            url = f"{target['url']}/rest/v1/app_state?on_conflict=key"
+            req = urlrequest.Request(url, data=body, headers=headers, method='POST')
+            with urlrequest.urlopen(req, timeout=20) as resp:
+                resp.read()
+            saved_any = True
+        except Exception as e:
+            log_event(f"Supabase save error [{target['name']}] ({state_key}): {e}")
+    return saved_any
 
 
 def load_json(path, default):

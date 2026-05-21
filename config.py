@@ -11,6 +11,8 @@ ADMIN_TOKEN = os.getenv('ADMIN_TOKEN', '')
 SERVER_LICENSE_SECRET = os.getenv('SERVER_LICENSE_SECRET', '')
 SUPABASE_URL = os.getenv('SUPABASE_URL', '').strip()
 SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY', '').strip()
+SUPABASE_BACKUP_URL = os.getenv('SUPABASE_BACKUP_URL', '').strip()
+SUPABASE_BACKUP_SERVICE_KEY = os.getenv('SUPABASE_BACKUP_SERVICE_KEY', '').strip()
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
 
 USERS_FILE = DATA_DIR / 'users.json'
