@@ -2091,6 +2091,33 @@ def admin_client_command():
     return jsonify({'success': True})
 
 
+@app.route('/admin/clear-all', methods=['POST'])
+@limiter.limit("10 per minute")
+def admin_clear_all():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    keep_bots = bool(data.get('keep_bots', True))
+    keep_games = bool(data.get('keep_games', True))
+    keep_links = bool(data.get('keep_links', True))
+    save_json(LICENSES_FILE, {})
+    save_json(USERS_FILE, {})
+    save_json(REVOKED_LICENSES_FILE, [])
+    save_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': '', 'links': {}})
+    if not keep_games:
+        save_json(GAMES_FILE, {})
+    if not keep_links:
+        save_quick_links({'active': False, 'telegram': '', 'youtube': '', 'normal': ''})
+    if not keep_bots:
+        save_variant_bot_content('', False)
+        save_variant_bot_content('', True)
+    pending_commands.clear()
+    client_pending_commands.clear()
+    log_admin_action('clear_all', '', {'keep_bots': keep_bots, 'keep_games': keep_games, 'keep_links': keep_links})
+    log_event('Admin full temizleme yapti')
+    return jsonify({'success': True})
+
+
 @app.route('/admin/sync-all', methods=['POST'])
 @limiter.limit("20 per minute")
 def admin_sync_all():
