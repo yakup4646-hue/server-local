@@ -21,7 +21,8 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from config import (
     HOST, PORT, ADMIN_TOKEN, SERVER_LICENSE_SECRET, SUPABASE_URL, SUPABASE_SERVICE_KEY,
-    SUPABASE_BACKUP_URL, SUPABASE_BACKUP_SERVICE_KEY, ALLOWED_ORIGINS,
+    SUPABASE_BACKUP_URL, SUPABASE_BACKUP_SERVICE_KEY, CLOUDFLARE_D1_ACCOUNT_ID,
+    CLOUDFLARE_D1_DATABASE_ID, CLOUDFLARE_D1_API_TOKEN, ALLOWED_ORIGINS,
     USERS_FILE, LICENSES_FILE, NOTICE_FILE, LOGS_FILE, BOT_FILE, BOT_ANDROID_FILE, GAMES_FILE, REVOKED_LICENSES_FILE, QUICK_LINKS_FILE
 )
 
@@ -77,6 +78,7 @@ SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_THRESHOLD = 3
 screenshot_rate_state = {}
+cloudflare_d1_table_ready = False
 
 
 def _supabase_targets():
@@ -96,7 +98,7 @@ def _supabase_targets():
 
 
 def _supabase_enabled():
-    return bool(_supabase_targets())
+    return bool(_supabase_targets() or _cloudflare_d1_enabled())
 
 
 def _supabase_headers(service_key):
@@ -107,10 +109,86 @@ def _supabase_headers(service_key):
     }
 
 
+def _cloudflare_d1_enabled():
+    return bool(CLOUDFLARE_D1_ACCOUNT_ID and CLOUDFLARE_D1_DATABASE_ID and CLOUDFLARE_D1_API_TOKEN)
+
+
+def _cloudflare_d1_query(sql, params=None):
+    account_id = quote(CLOUDFLARE_D1_ACCOUNT_ID, safe='')
+    database_id = quote(CLOUDFLARE_D1_DATABASE_ID, safe='')
+    url = f'https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}/query'
+    body = json.dumps({'sql': sql, 'params': params or []}).encode('utf-8')
+    headers = {
+        'Authorization': f'Bearer {CLOUDFLARE_D1_API_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    req = urlrequest.Request(url, data=body, headers=headers, method='POST')
+    with urlrequest.urlopen(req, timeout=20) as resp:
+        payload = json.loads(resp.read().decode('utf-8'))
+    if not payload.get('success'):
+        raise RuntimeError(json.dumps(payload.get('errors') or payload, ensure_ascii=False))
+    result = payload.get('result') or []
+    if isinstance(result, list):
+        result = result[0] if result else {}
+    if isinstance(result, dict) and not result.get('success', True):
+        raise RuntimeError(json.dumps(result, ensure_ascii=False))
+    return result if isinstance(result, dict) else {}
+
+
+def _cloudflare_d1_ensure_table():
+    global cloudflare_d1_table_ready
+    if cloudflare_d1_table_ready:
+        return
+    _cloudflare_d1_query(
+        'CREATE TABLE IF NOT EXISTS app_state ('
+        'key TEXT PRIMARY KEY, '
+        'value TEXT NOT NULL, '
+        'updated_at TEXT NOT NULL'
+        ')'
+    )
+    cloudflare_d1_table_ready = True
+
+
+def _cloudflare_d1_get_state(state_key, default):
+    if not _cloudflare_d1_enabled():
+        return default
+    try:
+        _cloudflare_d1_ensure_table()
+        result = _cloudflare_d1_query('SELECT value FROM app_state WHERE key = ? LIMIT 1', [state_key])
+        rows = result.get('results') or []
+        if not rows:
+            return default
+        row = rows[0]
+        if isinstance(row, dict):
+            raw_value = row.get('value')
+        elif isinstance(row, list) and row:
+            raw_value = row[0]
+        else:
+            raw_value = None
+        return json.loads(raw_value) if isinstance(raw_value, str) else default
+    except Exception as e:
+        log_event(f"Cloudflare D1 load error ({state_key}): {e}")
+        return default
+
+
+def _cloudflare_d1_set_state(state_key, value):
+    if not _cloudflare_d1_enabled():
+        return False
+    try:
+        _cloudflare_d1_ensure_table()
+        _cloudflare_d1_query(
+            'INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+            [state_key, json.dumps(value, ensure_ascii=False), datetime.now().isoformat()]
+        )
+        return True
+    except Exception as e:
+        log_event(f"Cloudflare D1 save error ({state_key}): {e}")
+        return False
+
+
 def _supabase_get_state(state_key, default):
     targets = _supabase_targets()
-    if not targets:
-        return default
     for target in targets:
         try:
             url = f"{target['url']}/rest/v1/app_state?key=eq.{quote(state_key)}&select=value"
@@ -121,13 +199,14 @@ def _supabase_get_state(state_key, default):
                 return rows[0].get('value', default)
         except Exception as e:
             log_event(f"Supabase load error [{target['name']}] ({state_key}): {e}")
+    cloudflare_value = _cloudflare_d1_get_state(state_key, None)
+    if cloudflare_value is not None:
+        return cloudflare_value
     return default
 
 
 def _supabase_set_state(state_key, value):
     targets = _supabase_targets()
-    if not targets:
-        return False
     body = json.dumps({
         'key': state_key,
         'value': value,
@@ -145,6 +224,8 @@ def _supabase_set_state(state_key, value):
             saved_any = True
         except Exception as e:
             log_event(f"Supabase save error [{target['name']}] ({state_key}): {e}")
+    if _cloudflare_d1_set_state(state_key, value):
+        saved_any = True
     return saved_any
 
 

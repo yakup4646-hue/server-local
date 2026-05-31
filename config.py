@@ -13,6 +13,9 @@ SUPABASE_URL = os.getenv('SUPABASE_URL', '').strip()
 SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY', '').strip()
 SUPABASE_BACKUP_URL = os.getenv('SUPABASE_BACKUP_URL', '').strip()
 SUPABASE_BACKUP_SERVICE_KEY = os.getenv('SUPABASE_BACKUP_SERVICE_KEY', '').strip()
+CLOUDFLARE_D1_ACCOUNT_ID = os.getenv('CLOUDFLARE_D1_ACCOUNT_ID', '').strip()
+CLOUDFLARE_D1_DATABASE_ID = os.getenv('CLOUDFLARE_D1_DATABASE_ID', '').strip()
+CLOUDFLARE_D1_API_TOKEN = os.getenv('CLOUDFLARE_D1_API_TOKEN', '').strip()
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv('ALLOWED_ORIGINS', '').split(',') if x.strip()]
 
 USERS_FILE = DATA_DIR / 'users.json'
