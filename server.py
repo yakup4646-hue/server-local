@@ -465,11 +465,15 @@ def load_variant_bot_content(is_android=False):
     if isinstance(bot_content, dict):
         bot_content = ''
     bot_content = str(bot_content or '')
+    if not bot_content.strip() and target_file.exists():
+        bot_content = target_file.read_text(encoding='utf-8', errors='ignore')
     if not bot_content.strip() and is_android:
         fallback_content = load_json(fallback_file, '') if _supabase_enabled() else fallback_file.read_text(encoding='utf-8', errors='ignore')
         if isinstance(fallback_content, dict):
             fallback_content = ''
         bot_content = str(fallback_content or '')
+        if not bot_content.strip() and fallback_file.exists():
+            bot_content = fallback_file.read_text(encoding='utf-8', errors='ignore')
     return bot_content
 
 
@@ -1444,6 +1448,9 @@ def api_auth():
     save_json(LICENSES_FILE, licenses)
 
     bot_code = load_variant_bot_content(android_mode)
+    if not bot_code.strip():
+        log_event(f"Auth bot missing: {uid[:8]}... -> {license_id} / {'android' if android_mode else 'desktop'}")
+        return jsonify({'success': False, 'error': 'Bot dosyasi serverda bos, panelden senkron gerekli'})
     if bot_code and android_mode:
         bot_code = apply_android_bot_patch(bot_code)
     if bot_code:
