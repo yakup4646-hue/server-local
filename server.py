@@ -123,8 +123,16 @@ def _cloudflare_d1_query(sql, params=None):
         'Content-Type': 'application/json'
     }
     req = urlrequest.Request(url, data=body, headers=headers, method='POST')
-    with urlrequest.urlopen(req, timeout=20) as resp:
-        payload = json.loads(resp.read().decode('utf-8'))
+    try:
+        with urlrequest.urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+    except HTTPError as e:
+        detail = ''
+        try:
+            detail = e.read().decode('utf-8', errors='ignore')
+        except Exception:
+            detail = str(e)
+        raise RuntimeError(f'Cloudflare D1 HTTP {e.code}: {detail[:1000]}')
     if not payload.get('success'):
         raise RuntimeError(json.dumps(payload.get('errors') or payload, ensure_ascii=False))
     result = payload.get('result') or []
@@ -2123,20 +2131,31 @@ def admin_storage_status():
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
     cloudflare = {'enabled': _cloudflare_d1_enabled(), 'ok': False, 'error': '', 'details': {}}
     if _cloudflare_d1_enabled():
+        probe = {'time': datetime.now().isoformat()}
+        set_ok = False
+        get_value = None
+        keys_result = None
         try:
-            probe = {'time': datetime.now().isoformat()}
             set_ok = _cloudflare_d1_set_state('__healthcheck', probe)
-            get_value = _cloudflare_d1_get_state('__healthcheck', None)
-            keys_result = _cloudflare_d1_query('SELECT "key", length(value) AS size FROM app_state ORDER BY updated_at DESC LIMIT 12')
-            cloudflare['ok'] = bool(set_ok and isinstance(get_value, dict) and get_value.get('time') == probe.get('time'))
-            cloudflare['details'] = {
-                'set_ok': set_ok,
-                'get_type': type(get_value).__name__,
-                'get_preview': _short_debug_value(get_value),
-                'keys_preview': _short_debug_value(keys_result.get('results') or []),
-            }
         except Exception as e:
-            cloudflare['error'] = str(e)
+            cloudflare['details']['set_error'] = str(e)
+        try:
+            get_value = _cloudflare_d1_get_state('__healthcheck', None)
+        except Exception as e:
+            cloudflare['details']['get_error'] = str(e)
+        try:
+            keys_result = _cloudflare_d1_query('SELECT "key", length(value) AS size FROM app_state ORDER BY updated_at DESC LIMIT 12')
+        except Exception as e:
+            cloudflare['details']['keys_error'] = str(e)
+        cloudflare['ok'] = bool(set_ok and isinstance(get_value, dict) and get_value.get('time') == probe.get('time'))
+        cloudflare['details'].update({
+            'set_ok': set_ok,
+            'get_type': type(get_value).__name__,
+            'get_preview': _short_debug_value(get_value),
+            'keys_preview': _short_debug_value((keys_result or {}).get('results') or []),
+        })
+        if not cloudflare['ok']:
+            cloudflare['error'] = '; '.join(str(v) for k, v in cloudflare['details'].items() if k.endswith('_error'))[:1000]
     return jsonify({
         'success': True,
         'supabase_targets': [t['name'] for t in _supabase_targets()],
