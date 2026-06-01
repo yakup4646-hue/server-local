@@ -141,7 +141,7 @@ def _cloudflare_d1_ensure_table():
         return
     _cloudflare_d1_query(
         'CREATE TABLE IF NOT EXISTS app_state ('
-        'key TEXT PRIMARY KEY, '
+        '"key" TEXT PRIMARY KEY, '
         'value TEXT NOT NULL, '
         'updated_at TEXT NOT NULL'
         ')'
@@ -154,7 +154,7 @@ def _cloudflare_d1_get_state(state_key, default):
         return default
     try:
         _cloudflare_d1_ensure_table()
-        result = _cloudflare_d1_query('SELECT value FROM app_state WHERE key = ? LIMIT 1', [state_key])
+        result = _cloudflare_d1_query('SELECT value FROM app_state WHERE "key" = ? LIMIT 1', [state_key])
         rows = result.get('results') or []
         if not rows:
             return default
@@ -177,8 +177,8 @@ def _cloudflare_d1_set_state(state_key, value):
     try:
         _cloudflare_d1_ensure_table()
         _cloudflare_d1_query(
-            'INSERT INTO app_state (key, value, updated_at) VALUES (?, ?, ?) '
-            'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+            'INSERT INTO app_state ("key", value, updated_at) VALUES (?, ?, ?) '
+            'ON CONFLICT("key") DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
             [state_key, json.dumps(value, ensure_ascii=False), datetime.now().isoformat()]
         )
         return True
@@ -2106,6 +2106,27 @@ def admin_bot_get():
     is_android = variant == 'android'
     bot_content = load_variant_bot_content(is_android)
     return jsonify({'success': True, 'variant': 'android' if is_android else 'desktop', 'bot_size': len(str(bot_content or ''))})
+
+
+@app.route('/admin/storage-status', methods=['GET'])
+@limiter.limit("10 per minute")
+def admin_storage_status():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    cloudflare = {'enabled': _cloudflare_d1_enabled(), 'ok': False, 'error': ''}
+    if _cloudflare_d1_enabled():
+        try:
+            probe = {'time': datetime.now().isoformat()}
+            cloudflare['ok'] = _cloudflare_d1_set_state('__healthcheck', probe) and _cloudflare_d1_get_state('__healthcheck', None) is not None
+        except Exception as e:
+            cloudflare['error'] = str(e)
+    return jsonify({
+        'success': True,
+        'supabase_targets': [t['name'] for t in _supabase_targets()],
+        'cloudflare_d1': cloudflare,
+        'bot_size': len(load_variant_bot_content(False)),
+        'bot_android_size': len(load_variant_bot_content(True)),
+    })
 
 
 @app.route('/admin/bot', methods=['POST'])
