@@ -187,6 +187,14 @@ def _cloudflare_d1_set_state(state_key, value):
         return False
 
 
+def _short_debug_value(value, limit=500):
+    try:
+        text = json.dumps(value, ensure_ascii=False)
+    except Exception:
+        text = str(value)
+    return text[:limit]
+
+
 def _supabase_get_state(state_key, default):
     targets = _supabase_targets()
     for target in targets:
@@ -2113,11 +2121,20 @@ def admin_bot_get():
 def admin_storage_status():
     if not check_admin(request):
         return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
-    cloudflare = {'enabled': _cloudflare_d1_enabled(), 'ok': False, 'error': ''}
+    cloudflare = {'enabled': _cloudflare_d1_enabled(), 'ok': False, 'error': '', 'details': {}}
     if _cloudflare_d1_enabled():
         try:
             probe = {'time': datetime.now().isoformat()}
-            cloudflare['ok'] = _cloudflare_d1_set_state('__healthcheck', probe) and _cloudflare_d1_get_state('__healthcheck', None) is not None
+            set_ok = _cloudflare_d1_set_state('__healthcheck', probe)
+            get_value = _cloudflare_d1_get_state('__healthcheck', None)
+            keys_result = _cloudflare_d1_query('SELECT "key", length(value) AS size FROM app_state ORDER BY updated_at DESC LIMIT 12')
+            cloudflare['ok'] = bool(set_ok and isinstance(get_value, dict) and get_value.get('time') == probe.get('time'))
+            cloudflare['details'] = {
+                'set_ok': set_ok,
+                'get_type': type(get_value).__name__,
+                'get_preview': _short_debug_value(get_value),
+                'keys_preview': _short_debug_value(keys_result.get('results') or []),
+            }
         except Exception as e:
             cloudflare['error'] = str(e)
     return jsonify({
