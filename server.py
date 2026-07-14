@@ -72,7 +72,7 @@ MAX_LICENSE_KEY_LENGTH = 4096
 MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
-MAX_SESSIONS_PER_USER = 5
+MAX_SESSIONS_PER_USER = 20
 SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
 SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
@@ -1330,6 +1330,27 @@ def valid_session(user, token):
     return any(secure_equals(str(s.get('token') or '').strip(), token) for s in (user.get('sessions') or []))
 
 
+def prune_user_sessions(sessions, fingerprint='', keep_token=''):
+    fingerprint = str(fingerprint or '').strip()
+    keep_token = str(keep_token or '').strip()
+    cleaned = []
+    seen = set()
+    for item in sessions or []:
+        token = str((item or {}).get('token') or '').strip()
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        cleaned.append(item)
+    if fingerprint:
+        same_fp = [s for s in cleaned if str((s or {}).get('fingerprint') or '').strip() == fingerprint]
+        other = [s for s in cleaned if str((s or {}).get('fingerprint') or '').strip() != fingerprint]
+        same_fp = same_fp[-3:]
+        cleaned = other + same_fp
+    if keep_token and not any(secure_equals(str((s or {}).get('token') or '').strip(), keep_token) for s in cleaned):
+        cleaned.append({'token': keep_token, 'fingerprint': fingerprint, 'time': datetime.now().isoformat()})
+    return cleaned[-MAX_SESSIONS_PER_USER:]
+
+
 def get_latest_uid(users=None):
     users = users or load_json(USERS_FILE, {})
     latest_uid = ''
@@ -1450,12 +1471,13 @@ def api_auth():
     users[uid]['last_login'] = datetime.now().isoformat()
     users[uid]['license_id'] = license_id
     users[uid]['language'] = language
-    users[uid].setdefault('sessions', []).append({
+    existing_sessions = users[uid].get('sessions') or []
+    existing_sessions.append({
         'token': session_token,
         'fingerprint': fingerprint,
         'time': datetime.now().isoformat()
     })
-    users[uid]['sessions'] = (users[uid].get('sessions') or [])[-MAX_SESSIONS_PER_USER:]
+    users[uid]['sessions'] = prune_user_sessions(existing_sessions, fingerprint, session_token)
 
     row['language'] = language
     row['last_login'] = datetime.now().isoformat()
@@ -1505,18 +1527,20 @@ def api_heartbeat():
     users = load_json(USERS_FILE, {})
     licenses = load_json(LICENSES_FILE, {})
     user = users.get(uid)
-    if not user or not valid_session(user, token):
-        return jsonify({'success': False, 'error': 'off'})
+    if not user:
+        return jsonify({'success': False, 'error': 'session user not found'})
+    if not valid_session(user, token):
+        return jsonify({'success': False, 'error': 'session expired'})
     license_id = user.get('license_id')
     row = licenses.get(license_id or '')
     if not row or not row.get('active', True):
-        return jsonify({'success': False, 'error': 'off'})
+        return jsonify({'success': False, 'error': 'license inactive'})
     if str(row.get('uid') or '').strip().lower() != uid:
         return jsonify({'success': False, 'error': 'invalid uid'})
     if row.get('client_id') and incoming_client_id and incoming_client_id != row.get('client_id'):
-        return jsonify({'success': False, 'error': 'off'})
+        return jsonify({'success': False, 'error': 'client id mismatch'})
     if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
-        return jsonify({'success': False, 'error': 'off'})
+        return jsonify({'success': False, 'error': 'script hash mismatch'})
     row['last_heartbeat'] = datetime.now().isoformat()
     licenses[license_id] = row
     save_json(LICENSES_FILE, licenses)
@@ -1592,12 +1616,14 @@ def api_bot_bootstrap_check():
     users = load_json(USERS_FILE, {})
     licenses = load_json(LICENSES_FILE, {})
     user = users.get(uid)
-    if not user or not valid_session(user, session_token):
-        return jsonify({'success': False, 'error': 'gecersiz oturum'}), 401
+    if not user:
+        return jsonify({'success': False, 'error': 'session user not found'}), 401
+    if not valid_session(user, session_token):
+        return jsonify({'success': False, 'error': 'session expired'}), 401
     license_id = user.get('license_id')
     row = licenses.get(license_id or '') or {}
     if not row or not row.get('active', True):
-        return jsonify({'success': False, 'error': 'off'}), 401
+        return jsonify({'success': False, 'error': 'license inactive'}), 401
     if str(row.get('uid') or '').strip().lower() != uid:
         return jsonify({'success': False, 'error': 'script gecersiz'}), 401
     if str(row.get('client_id') or '').strip() != client_id:
