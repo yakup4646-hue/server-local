@@ -72,7 +72,7 @@ MAX_LICENSE_KEY_LENGTH = 4096
 MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
-MAX_SESSIONS_PER_USER = 20
+MAX_SESSIONS_PER_USER = 100
 SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
 SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
@@ -1341,11 +1341,6 @@ def prune_user_sessions(sessions, fingerprint='', keep_token=''):
             continue
         seen.add(token)
         cleaned.append(item)
-    if fingerprint:
-        same_fp = [s for s in cleaned if str((s or {}).get('fingerprint') or '').strip() == fingerprint]
-        other = [s for s in cleaned if str((s or {}).get('fingerprint') or '').strip() != fingerprint]
-        same_fp = same_fp[-3:]
-        cleaned = other + same_fp
     if keep_token and not any(secure_equals(str((s or {}).get('token') or '').strip(), keep_token) for s in cleaned):
         cleaned.append({'token': keep_token, 'fingerprint': fingerprint, 'time': datetime.now().isoformat()})
     return cleaned[-MAX_SESSIONS_PER_USER:]
