@@ -11,6 +11,7 @@ import secrets
 import hmac
 import re
 import threading
+import copy
 import time
 from datetime import datetime
 from io import BytesIO
@@ -72,13 +73,18 @@ MAX_LICENSE_KEY_LENGTH = 4096
 MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
-MAX_SESSIONS_PER_USER = 100
+MAX_SESSIONS_PER_USER = 20
 SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
 SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_THRESHOLD = 3
 screenshot_rate_state = {}
 cloudflare_d1_table_ready = False
+state_cache = {}
+state_cache_lock = threading.RLock()
+remote_write_pending = {}
+remote_write_event = threading.Event()
+remote_write_started = False
 
 
 def _supabase_targets():
@@ -248,20 +254,56 @@ def _supabase_set_state(state_key, value):
 def load_json(path, default):
     state_key = REMOTE_STATE_KEYS.get(str(path))
     if state_key:
+        with state_cache_lock:
+            if state_key in state_cache:
+                return copy.deepcopy(state_cache[state_key])
         remote = _supabase_get_state(state_key, None)
         if remote is not None:
-            return remote
+            with state_cache_lock:
+                if state_key not in state_cache:
+                    state_cache[state_key] = copy.deepcopy(remote)
+                return copy.deepcopy(state_cache[state_key])
     try:
-        return json.loads(path.read_text(encoding='utf-8'))
+        value = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
-        return default
+        value = default
+    if state_key:
+        with state_cache_lock:
+            state_cache[state_key] = copy.deepcopy(value)
+    return copy.deepcopy(value)
+
+
+def _remote_write_loop():
+    while True:
+        remote_write_event.wait()
+        while True:
+            with state_cache_lock:
+                if not remote_write_pending:
+                    remote_write_event.clear()
+                    break
+                state_key = next(iter(remote_write_pending))
+                value = remote_write_pending.pop(state_key)
+            _supabase_set_state(state_key, value)
+
+
+def _queue_remote_write(state_key, data):
+    global remote_write_started
+    with state_cache_lock:
+        remote_write_pending[state_key] = copy.deepcopy(data)
+        if not remote_write_started:
+            threading.Thread(target=_remote_write_loop, name='remote-state-writer', daemon=True).start()
+            remote_write_started = True
+        remote_write_event.set()
 
 
 def save_json(path, data):
     state_key = REMOTE_STATE_KEYS.get(str(path))
     if state_key:
-        _supabase_set_state(state_key, data)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+        with state_cache_lock:
+            state_cache[state_key] = copy.deepcopy(data)
+        _queue_remote_write(state_key, data)
+    with state_cache_lock:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 def log_event(event):
@@ -1435,9 +1477,10 @@ def api_auth():
     if client_id and row.get('client_id') and client_id != row.get('client_id'):
         return jsonify({'success': False, 'error': 'Script kimligi uyusmuyor'})
 
-    expected_hash = str(row.get('script_hash') or '').strip()
-    if expected_hash and incoming_hash and incoming_hash != expected_hash:
+    canonical_hash = client_hash_text(client_name + '|' + client_id)
+    if canonical_hash and incoming_hash and incoming_hash != canonical_hash:
         return jsonify({'success': False, 'error': 'Script dogrulamasi basarisiz'})
+    row['script_hash'] = canonical_hash
 
     bound_uid = str(row.get('uid') or '').strip().lower()
     users = load_json(USERS_FILE, {})
