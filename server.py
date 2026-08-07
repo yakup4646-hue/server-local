@@ -9,6 +9,7 @@ import base64
 import hashlib
 import secrets
 import hmac
+import os
 import re
 import threading
 import copy
@@ -1415,6 +1416,29 @@ def api_public_links():
     return jsonify({'success': True, 'quick_links': load_quick_links()})
 
 
+@app.route('/api/client-config', methods=['GET'])
+@limiter.limit("30 per minute")
+def api_client_config():
+    raw_urls = os.environ.get('CLIENT_SERVER_URLS') or os.environ.get('EXTRA_SERVER_URLS') or ''
+    urls = []
+    seen = set()
+    for item in re.split(r'[\s,;]+', raw_urls):
+        url = str(item or '').strip().rstrip('/')
+        if not re.match(r'^https://[a-z0-9.-]+(?::\d+)?$', url, re.IGNORECASE):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return jsonify({
+        'success': True,
+        'data': {
+            'server_urls': urls,
+            'config_version': os.environ.get('CLIENT_CONFIG_VERSION', '1')
+        }
+    })
+
+
 @app.route('/api/auth', methods=['POST'])
 @limiter.limit("10 per minute")
 def api_auth():
@@ -2309,9 +2333,39 @@ def admin_clear_all():
     keep_bots = bool(data.get('keep_bots', True))
     keep_games = bool(data.get('keep_games', True))
     keep_links = bool(data.get('keep_links', True))
+    licenses = load_json(LICENSES_FILE, {})
+    revoked = load_revoked_licenses()
+    revoked_seen = set()
+    for item in revoked:
+        if isinstance(item, dict):
+            revoked_seen.add((
+                str(item.get('license_id') or '').strip(),
+                str(item.get('encrypted_license') or '').strip(),
+                str(item.get('client_id') or '').strip(),
+                str(item.get('script_hash') or '').strip()
+            ))
+    for license_id, row in list(licenses.items()):
+        row = row if isinstance(row, dict) else {}
+        revoke_item = {
+            'license_id': str(license_id or row.get('license_id') or '').strip(),
+            'encrypted_license': str(row.get('encrypted_license') or '').strip(),
+            'client_id': str(row.get('client_id') or '').strip(),
+            'script_hash': str(row.get('script_hash') or '').strip(),
+            'deleted_at': datetime.now().isoformat(),
+            'reason': 'admin_clear_all'
+        }
+        marker = (
+            revoke_item['license_id'],
+            revoke_item['encrypted_license'],
+            revoke_item['client_id'],
+            revoke_item['script_hash']
+        )
+        if any(marker) and marker not in revoked_seen:
+            revoked.append(revoke_item)
+            revoked_seen.add(marker)
     save_json(LICENSES_FILE, {})
     save_json(USERS_FILE, {})
-    save_json(REVOKED_LICENSES_FILE, [])
+    save_revoked_licenses(revoked)
     save_json(NOTICE_FILE, {'id': '', 'text': '', 'created_at': '', 'links': {}})
     if not keep_games:
         save_json(GAMES_FILE, {})
