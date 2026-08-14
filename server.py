@@ -1001,6 +1001,24 @@ def normalize_percent_value(raw_value=0):
     return float(raw_value or 0) / 100.0
 
 
+def get_miner_width(miner=None):
+    miner = miner or {}
+    for key in ('width', 'cell_width', 'slots'):
+        width = _to_int(miner.get(key) or 0)
+        if width > 0:
+            return max(1, min(2, width))
+    for nested_key in ('miner_info', 'item_info', 'info'):
+        nested = miner.get(nested_key) or {}
+        if isinstance(nested, dict):
+            width = _to_int(nested.get('width') or nested.get('cell_width') or nested.get('slots') or 0)
+            if width > 0:
+                return max(1, min(2, width))
+    frame_width = _to_int(((miner.get('frames_data') or {}).get('frame_width')) or 0)
+    if frame_width >= 100:
+        return 2
+    return 1
+
+
 def calculate_miner_base_effective_power(miner=None):
     miner = miner or {}
     power = float(miner.get('power') or 0)
@@ -1026,6 +1044,7 @@ def expand_inventory_miner_items(items=None):
             row['_id'] = f"inventory-{item.get('miner_id') or 'miner'}-{idx}"
             row['source'] = 'inventory'
             row['placement'] = None
+            row['width'] = get_miner_width(row)
             expanded.append(row)
     return expanded
 
@@ -1233,7 +1252,7 @@ def row_sort_key(row, strategy='bonus-desc'):
 
 def miner_sort_key(miner, strategy='power'):
     power = calculate_miner_base_effective_power(miner)
-    width = max(1, _to_int(miner.get('width') or 1))
+    width = get_miner_width(miner)
     density = power / width
     base = []
     if strategy == 'density':
@@ -1248,8 +1267,8 @@ def miner_sort_key(miner, strategy='power'):
 def build_miner_auto_plan(room_data, row_strategy='bonus-desc', miner_strategy='power'):
     row_targets = sorted(build_miner_row_targets(room_data), key=lambda row: row_sort_key(row, row_strategy))
     miners = [dict(m) for m in (room_data.get('minersAll') or room_data.get('miners') or [])]
-    width_one = sorted([m for m in miners if _to_int(m.get('width') or 1) <= 1], key=lambda m: miner_sort_key(m, miner_strategy))
-    width_two = sorted([m for m in miners if _to_int(m.get('width') or 1) >= 2], key=lambda m: miner_sort_key(m, miner_strategy))
+    width_one = sorted([m for m in miners if get_miner_width(m) <= 1], key=lambda m: miner_sort_key(m, miner_strategy))
+    width_two = sorted([m for m in miners if get_miner_width(m) >= 2], key=lambda m: miner_sort_key(m, miner_strategy))
     multipliers = [1 + (normalize_percent_value(row.get('bonus') or 0) / 100.0) for row in row_targets]
 
     states = {'0|0': {'score': 0.0, 'prev': None, 'choice': None}}
@@ -1304,7 +1323,8 @@ def build_miner_auto_plan(room_data, row_strategy='bonus-desc', miner_strategy='
     for choice in selected_rows:
         row_target = row_targets[choice['rowIndex']]
         for miner_index, miner in enumerate(choice.get('miners') or []):
-            width = max(1, _to_int(miner.get('width') or 1))
+            width = get_miner_width(miner)
+            miner['width'] = width
             assignments.append({
                 'miner': miner,
                 'target': row_target,
