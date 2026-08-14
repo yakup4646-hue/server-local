@@ -1056,6 +1056,11 @@ def ensure_room_data_augmented(room_data):
     return room_data
 
 
+def get_room_config_for_level(room_data, room_level, fallback_room=None):
+    room_levels = ((room_data.get('appearance') or {}).get('room_levels_config') or [])
+    return next((cfg for cfg in room_levels if _to_int(cfg.get('level') or 0) == room_level), None) or (room_levels[0] if room_levels else None) or ((fallback_room or {}).get('room_info') or {})
+
+
 def get_room_rack_grid_info(room_data):
     racks = room_data.get('racks') or []
     first_rack = racks[0] if racks else {}
@@ -1063,11 +1068,63 @@ def get_room_rack_grid_info(room_data):
     first_room = rooms_available[0] if rooms_available else {}
     user_room_id = (((first_rack.get('placement') or {}).get('user_room_id')) or first_room.get('_id') or '')
     room_level = _to_int(((first_rack.get('placement') or {}).get('room_level')) or ((first_room.get('room_info') or {}).get('level')) or 0)
-    room_levels = ((room_data.get('appearance') or {}).get('room_levels_config') or [])
-    room_config = next((cfg for cfg in room_levels if _to_int(cfg.get('level') or 0) == room_level), None) or (room_levels[0] if room_levels else None) or first_room.get('room_info') or {}
+    room_config = get_room_config_for_level(room_data, room_level, first_room)
     slot_cols = max(1, _to_int(room_config.get('cols') or 8) // 2)
     slot_rows = max(1, _to_int(room_config.get('rows') or 3))
     return {'userRoomId': user_room_id, 'roomLevel': room_level, 'slotCols': slot_cols, 'slotRows': slot_rows, 'totalSlots': slot_cols * slot_rows}
+
+
+def build_all_room_rack_slots(room_data):
+    rooms_available = room_data.get('rooms_available') or []
+    racks = room_data.get('racks') or []
+    room_refs = []
+    seen = set()
+
+    def add_room(user_room_id='', room_level=0, room=None):
+        user_room_id = str(user_room_id or '').strip()
+        room_level = _to_int(room_level or 0)
+        key = f'{user_room_id}:{room_level}'
+        if not user_room_id or key in seen:
+            return
+        seen.add(key)
+        room_refs.append({'userRoomId': user_room_id, 'roomLevel': room_level, 'room': room or {}})
+
+    for room in rooms_available:
+        add_room(room.get('_id') or '', ((room.get('room_info') or {}).get('level')) or 0, room)
+
+    for rack in racks:
+        placement = rack.get('placement') or {}
+        add_room(placement.get('user_room_id') or '', placement.get('room_level') or 0, {})
+
+    if not room_refs:
+        grid = get_room_rack_grid_info(room_data)
+        room_refs.append({'userRoomId': grid['userRoomId'], 'roomLevel': grid['roomLevel'], 'room': {}})
+
+    slots = []
+    room_grids = []
+    for room_ref in room_refs:
+        room_config = get_room_config_for_level(room_data, room_ref['roomLevel'], room_ref.get('room') or {})
+        slot_cols = max(1, _to_int(room_config.get('cols') or 8) // 2)
+        slot_rows = max(1, _to_int(room_config.get('rows') or 3))
+        room_grid = {
+            'userRoomId': room_ref['userRoomId'],
+            'roomLevel': room_ref['roomLevel'],
+            'slotCols': slot_cols,
+            'slotRows': slot_rows,
+            'totalSlots': slot_cols * slot_rows
+        }
+        room_grids.append(room_grid)
+        for y in range(slot_rows):
+            for x in range(slot_cols):
+                slots.append({
+                    'x': x,
+                    'y': y,
+                    'rackIndex': (y * slot_cols) + x,
+                    'user_room_id': room_ref['userRoomId'],
+                    'room_level': room_ref['roomLevel'],
+                    'roomOrder': len(room_grids) - 1
+                })
+    return {'rooms': room_grids, 'slots': slots, 'totalSlots': len(slots)}
 
 
 def get_rack_candidate_value(rack=None):
@@ -1090,11 +1147,8 @@ def rack_cmp_tuple(rack=None):
 
 def build_full_rack_placement_plan(room_data, strategy='value'):
     room_data = ensure_room_data_augmented(room_data)
-    grid = get_room_rack_grid_info(room_data)
-    slot_list = []
-    for y in range(grid['slotRows']):
-        for x in range(grid['slotCols']):
-            slot_list.append({'x': x, 'y': y, 'rackIndex': (y * grid['slotCols']) + x, 'user_room_id': grid['userRoomId'], 'room_level': grid['roomLevel']})
+    grid = build_all_room_rack_slots(room_data)
+    slot_list = grid['slots']
 
     current_racks = [dict(r, source='room') for r in (room_data.get('racks') or [])]
     inventory_racks = expand_inventory_rack_items(room_data.get('rackInventoryItems') or [])
@@ -1162,17 +1216,19 @@ def build_miner_row_targets(room_data):
                 'row': y,
                 'rackHeight': height,
                 'roomX': _to_int(placement.get('x') or 0),
-                'roomY': _to_int(placement.get('y') or 0)
+                'roomY': _to_int(placement.get('y') or 0),
+                'roomId': str(placement.get('user_room_id') or ''),
+                'roomLevel': _to_int(placement.get('room_level') or 0)
             })
     return rows
 
 
 def row_sort_key(row, strategy='bonus-desc'):
     if strategy == 'rack-grouped':
-        return (-_to_int(row.get('bonus') or 0), -_to_int(row.get('rackHeight') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('row') or 0))
+        return (-_to_int(row.get('bonus') or 0), -_to_int(row.get('rackHeight') or 0), str(row.get('roomId') or ''), _to_int(row.get('roomX') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('row') or 0))
     if strategy == 'tall-first':
-        return (-_to_int(row.get('rackHeight') or 0), -_to_int(row.get('bonus') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
-    return (-_to_int(row.get('bonus') or 0), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
+        return (-_to_int(row.get('rackHeight') or 0), -_to_int(row.get('bonus') or 0), str(row.get('roomId') or ''), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
+    return (-_to_int(row.get('bonus') or 0), str(row.get('roomId') or ''), _to_int(row.get('roomY') or 0), _to_int(row.get('roomX') or 0), _to_int(row.get('row') or 0))
 
 
 def miner_sort_key(miner, strategy='power'):
