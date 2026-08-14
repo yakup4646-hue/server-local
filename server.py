@@ -1019,6 +1019,18 @@ def get_miner_width(miner=None):
     return 1
 
 
+def get_rack_height(rack=None):
+    rack = rack or {}
+    rack_info = rack.get('rack_info') or {}
+    raw_height = _to_int(rack_info.get('height') or rack.get('height') or 0)
+    cells = _to_int(rack_info.get('cells') or rack.get('cells') or 0)
+    if cells > 0:
+        return max(1, cells // 2)
+    if raw_height > 4 and raw_height % 2 == 0:
+        return max(1, raw_height // 2)
+    return max(1, raw_height or 3)
+
+
 def calculate_miner_base_effective_power(miner=None):
     miner = miner or {}
     power = float(miner.get('power') or 0)
@@ -1059,6 +1071,7 @@ def expand_inventory_rack_items(items=None):
             row['source'] = 'inventory'
             row['placement'] = None
             row['rack_info'] = row.get('rack_info') or {'width': 2, 'height': (_to_int(row.get('cells') or 0) // 2) or 3}
+            row['rack_info']['height'] = get_rack_height(row)
             row['bonus'] = _to_int(row.get('bonus') or 0)
             expanded.append(row)
     return expanded
@@ -1148,7 +1161,7 @@ def build_all_room_rack_slots(room_data):
 
 def get_rack_candidate_value(rack=None):
     rack = rack or {}
-    height = _to_int(((rack.get('rack_info') or {}).get('height')) or 0)
+    height = get_rack_height(rack)
     bonus_percent = normalize_percent_value(rack.get('bonus') or 0)
     return height * (1 + (bonus_percent / 100.0))
 
@@ -1158,7 +1171,7 @@ def rack_cmp_tuple(rack=None):
     return (
         -get_rack_candidate_value(rack),
         -_to_int(rack.get('bonus') or 0),
-        -_to_int(((rack.get('rack_info') or {}).get('height')) or 0),
+        -get_rack_height(rack),
         str(rack.get('name') or ''),
         str(rack.get('_id') or rack.get('rack_id') or '')
     )
@@ -1177,10 +1190,10 @@ def build_full_rack_placement_plan(room_data, strategy='value'):
         return rack_cmp_tuple(r)
 
     def sort_key_bonus_first(r):
-        return (-_to_int(r.get('bonus') or 0), -_to_int(((r.get('rack_info') or {}).get('height')) or 0), *rack_cmp_tuple(r)[3:])
+        return (-_to_int(r.get('bonus') or 0), -get_rack_height(r), *rack_cmp_tuple(r)[3:])
 
     def sort_key_height_first(r):
-        return (-_to_int(((r.get('rack_info') or {}).get('height')) or 0), -_to_int(r.get('bonus') or 0), *rack_cmp_tuple(r)[3:])
+        return (-get_rack_height(r), -_to_int(r.get('bonus') or 0), *rack_cmp_tuple(r)[3:])
 
     key_fn = sort_key_value if strategy == 'value' else (sort_key_bonus_first if strategy == 'bonus-first' else sort_key_height_first)
     all_candidates = sorted(all_candidates, key=key_fn)
@@ -1224,7 +1237,7 @@ def build_virtual_room_data_for_plan(room_data, rack_plan):
 def build_miner_row_targets(room_data):
     rows = []
     for rack in (room_data.get('racks') or []):
-        height = _to_int(((rack.get('rack_info') or {}).get('height')) or 0)
+        height = get_rack_height(rack)
         bonus = _to_int(rack.get('bonus') or 0)
         placement = rack.get('placement') or {}
         for y in range(height):
