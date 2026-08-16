@@ -1516,7 +1516,13 @@ def api_client_config():
     raw_urls = os.environ.get('CLIENT_SERVER_URLS') or os.environ.get('EXTRA_SERVER_URLS') or ''
     urls = []
     seen = set()
-    for item in re.split(r'[\s,;]+', raw_urls):
+    default_urls = [
+        os.environ.get('PUBLIC_SERVER_URL', ''),
+        'https://server-local.onrender.com',
+        'https://server-local-ypgs.onrender.com',
+        'https://server-local-id1o.onrender.com',
+    ]
+    for item in default_urls + re.split(r'[\s,;]+', raw_urls):
         url = str(item or '').strip().rstrip('/')
         if not re.match(r'^https://[a-z0-9.-]+(?::\d+)?$', url, re.IGNORECASE):
             continue
