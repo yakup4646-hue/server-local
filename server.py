@@ -75,6 +75,11 @@ MAX_NOTICE_TEXT_LENGTH = 4000
 MAX_SCREENSHOT_B64_LENGTH = 8 * 1024 * 1024
 MAX_JSON_FIELD_LENGTH = 2000
 MAX_SESSIONS_PER_USER = 20
+HEARTBEAT_WRITE_INTERVAL_SECONDS = max(30, int(os.getenv('HEARTBEAT_WRITE_INTERVAL_SECONDS', '180') or '180'))
+ONLINE_HEARTBEAT_WINDOW_SECONDS = max(90, HEARTBEAT_WRITE_INTERVAL_SECONDS * 2)
+ENABLE_TELEGRAM_POLLING = str(os.getenv('ENABLE_TELEGRAM_POLLING', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+TELEGRAM_POLL_INTERVAL_SECONDS = max(15, int(os.getenv('TELEGRAM_POLL_INTERVAL_SECONDS', '60') or '60'))
+ENABLE_NOTIFY_LOGS = str(os.getenv('ENABLE_NOTIFY_LOGS', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
 SCREENSHOT_MIN_INTERVAL_SECONDS = 5 * 60
 SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
@@ -870,7 +875,7 @@ def is_license_online(row, now=None):
     if not hb:
         return False
     try:
-        return (now - datetime.fromisoformat(hb)).total_seconds() <= 90
+        return (now - datetime.fromisoformat(hb)).total_seconds() <= ONLINE_HEARTBEAT_WINDOW_SECONDS
     except Exception:
         return False
 
@@ -984,7 +989,7 @@ def poll_all_telegram_bots():
                 log_event('Telegram polling aktif')
         except Exception as e:
             log_event(f'Telegram polling error: {e}')
-        threading.Event().wait(5)
+        threading.Event().wait(TELEGRAM_POLL_INTERVAL_SECONDS)
 
 
 def _to_int(value, default=0):
@@ -1692,9 +1697,18 @@ def api_heartbeat():
         return jsonify({'success': False, 'error': 'client id mismatch'})
     if row.get('script_hash') and incoming_hash and incoming_hash != row.get('script_hash'):
         return jsonify({'success': False, 'error': 'script hash mismatch'})
-    row['last_heartbeat'] = datetime.now().isoformat()
-    licenses[license_id] = row
-    save_json(LICENSES_FILE, licenses)
+    now = datetime.now()
+    should_write_heartbeat = True
+    last_heartbeat = str(row.get('last_heartbeat') or '').strip()
+    if last_heartbeat:
+        try:
+            should_write_heartbeat = (now - datetime.fromisoformat(last_heartbeat)).total_seconds() >= HEARTBEAT_WRITE_INTERVAL_SECONDS
+        except Exception:
+            should_write_heartbeat = True
+    if should_write_heartbeat:
+        row['last_heartbeat'] = now.isoformat()
+        licenses[license_id] = row
+        save_json(LICENSES_FILE, licenses)
     return jsonify({'success': True})
 
 
@@ -1851,7 +1865,8 @@ def api_notify():
     if error:
         return error
     data = request.get_json() or {}
-    log_event(f"Notify[{bot_auth['uid'][:8]}]: {json.dumps(data, ensure_ascii=False)[:500]}")
+    if ENABLE_NOTIFY_LOGS:
+        log_event(f"Notify[{bot_auth['uid'][:8]}]: {json.dumps(data, ensure_ascii=False)[:500]}")
     return jsonify({'success': True, 'received': data})
 
 
@@ -2515,6 +2530,10 @@ if __name__ == '__main__':
     verify_bot_files()
     if not ADMIN_TOKEN:
         log_event('UYARI: ADMIN_TOKEN bos.')
-    telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
-    telegram_thread.start()
+    if ENABLE_TELEGRAM_POLLING:
+        telegram_thread = threading.Thread(target=poll_all_telegram_bots, daemon=True)
+        telegram_thread.start()
+        log_event(f'Telegram polling acik interval={TELEGRAM_POLL_INTERVAL_SECONDS}s')
+    else:
+        log_event('Telegram polling kapali')
     app.run(host=HOST, port=PORT, debug=False)
