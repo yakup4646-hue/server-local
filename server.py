@@ -1521,6 +1521,7 @@ def api_client_config():
         'https://server-local.onrender.com',
         'https://server-local-ypgs.onrender.com',
         'https://server-local-id1o.onrender.com',
+        'https://server-local-production.up.railway.app',
     ]
     for item in default_urls + re.split(r'[\s,;]+', raw_urls):
         url = str(item or '').strip().rstrip('/')
