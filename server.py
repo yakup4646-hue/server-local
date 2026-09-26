@@ -2198,6 +2198,57 @@ def admin_license_create():
     return jsonify({'success': True, 'license': licenses[license_id]})
 
 
+@app.route('/admin/license/bulk-create', methods=['POST'])
+@limiter.limit("10 per minute")
+def admin_license_bulk_create():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    rows = data.get('licenses') or []
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
+        return jsonify({'success': False, 'error': 'Lisans listesi 1-100 kayit olmali'}), 400
+
+    licenses = load_json(LICENSES_FILE, {})
+    created_ids = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return jsonify({'success': False, 'error': 'Gecersiz lisans satiri'}), 400
+        license_id = str(row.get('license_id') or '').strip()
+        client_name = str(row.get('client_name') or 'Kullanici').strip() or 'Kullanici'
+        client_id = str(row.get('client_id') or '').strip()
+        encrypted_license = str(row.get('encrypted_license') or '').strip()
+        script_hash = str(row.get('script_hash') or '').strip()
+        script_file = str(row.get('script_file') or '').strip()
+        if not license_id or not client_id or not encrypted_license or not script_file:
+            return jsonify({'success': False, 'error': f'Eksik lisans bilgisi: {client_name}'}), 400
+        licenses[license_id] = {
+            'license_id': license_id,
+            'client_name': client_name,
+            'client_id': client_id,
+            'issued_at': datetime.now().isoformat(),
+            'uid': None,
+            'active': True,
+            'status': 'active',
+            'allow_uid_change': bool(row.get('allow_uid_change', True)),
+            'script_hash': script_hash or client_hash_text(client_name + '|' + client_id),
+            'last_heartbeat': None,
+            'script_file': script_file,
+            'encrypted_license': encrypted_license,
+            'suspicious_reason': '',
+            'telegram_token': '',
+            'telegram_chat_id': '',
+            'message_text': '',
+            'message_status': '',
+            'message_id': ''
+        }
+        created_ids.append(license_id)
+
+    save_json(LICENSES_FILE, licenses)
+    log_admin_action('license_bulk_create', '', {'count': len(created_ids)})
+    log_event(f'Admin toplu lisans olusturdu: {len(created_ids)} kayit')
+    return jsonify({'success': True, 'created_count': len(created_ids), 'license_ids': created_ids})
+
+
 @app.route('/admin/license/state', methods=['POST'])
 @limiter.limit("30 per minute")
 def admin_license_state():
