@@ -4,6 +4,16 @@
   "main": "src/index.js",
   "compatibility_date": "2026-09-25",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "CLIENT_SERVER_URLS": "https://server-local-cf.sametdemirr87.workers.dev,https://server-local.onrender.com,https://server-local-ypgs.onrender.com,https://server-local-id1o.onrender.com,https://server-local-production.up.railway.app"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "server-local-db",
+      "database_id": "3fea3eb0-ef27-470a-ae0a-2a2c09122c47"
+    }
+  ],
   "observability": {
     "enabled": false
   }
