@@ -60,6 +60,7 @@ last_bot_status = {
     "instant_power": 0,
     "remaining_seconds": 0
 }
+SERVER_TARGET_FILE = LICENSES_FILE.parent / 'server_target.json'
 REMOTE_STATE_KEYS = {
     str(USERS_FILE): 'users',
     str(LICENSES_FILE): 'licenses',
@@ -69,6 +70,7 @@ REMOTE_STATE_KEYS = {
     str(GAMES_FILE): 'games',
     str(REVOKED_LICENSES_FILE): 'revoked_licenses',
     str(QUICK_LINKS_FILE): 'quick_links',
+    str(SERVER_TARGET_FILE): 'server_target',
 }
 MAX_LICENSE_KEY_LENGTH = 4096
 MAX_NOTICE_TEXT_LENGTH = 4000
@@ -85,6 +87,7 @@ SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_THRESHOLD = 3
 screenshot_rate_state = {}
+active_server_health_cache = {'url': '', 'checked_at': 0.0, 'healthy': False}
 cloudflare_d1_table_ready = False
 state_cache = {}
 state_cache_lock = threading.RLock()
@@ -1495,6 +1498,71 @@ def get_latest_uid(users=None):
     return latest_uid
 
 
+def normalize_server_url(value):
+    value = str(value or '').strip().rstrip('/')
+    if not re.match(r'^https://[a-z0-9.-]+(?::\d+)?$', value, re.IGNORECASE):
+        return ''
+    return value
+
+
+def get_active_server_url():
+    data = load_json(SERVER_TARGET_FILE, {})
+    return normalize_server_url((data or {}).get('active_server_url'))
+
+
+def set_active_server_url(value):
+    value = normalize_server_url(value)
+    if not value:
+        return ''
+    save_json(SERVER_TARGET_FILE, {
+        'active_server_url': value,
+        'updated_at': datetime.now().isoformat()
+    })
+    return value
+
+
+def active_server_is_healthy(active_url):
+    active_url = normalize_server_url(active_url)
+    if not active_url:
+        return False
+    now = time.time()
+    if (
+        active_server_health_cache.get('url') == active_url
+        and now - float(active_server_health_cache.get('checked_at') or 0) < 30
+    ):
+        return bool(active_server_health_cache.get('healthy'))
+    healthy = False
+    try:
+        req = urlrequest.Request(active_url + '/api/health', method='GET')
+        with urlrequest.urlopen(req, timeout=3) as resp:
+            healthy = 200 <= int(resp.status) < 300
+    except Exception:
+        healthy = False
+    active_server_health_cache.update({
+        'url': active_url,
+        'checked_at': now,
+        'healthy': healthy
+    })
+    return healthy
+
+
+@app.before_request
+def route_clients_to_active_server():
+    if not request.path.startswith('/api/'):
+        return None
+    if request.path in {'/api/health', '/api/client-config'}:
+        return None
+    active_url = get_active_server_url()
+    current_url = normalize_server_url(request.host_url)
+    if active_url and current_url and active_url != current_url and active_server_is_healthy(active_url):
+        return jsonify({
+            'success': False,
+            'error': 'Sunucu gecisi gerekli',
+            'active_server_url': active_url
+        }), 503
+    return None
+
+
 @app.route('/')
 def index():
     return jsonify({'success': True, 'service': 'server-local-online-api', 'status': 'ok'})
@@ -1516,7 +1584,9 @@ def api_client_config():
     raw_urls = os.environ.get('CLIENT_SERVER_URLS') or os.environ.get('EXTRA_SERVER_URLS') or ''
     urls = []
     seen = set()
+    active_url = get_active_server_url()
     default_urls = [
+        active_url,
         os.environ.get('PUBLIC_SERVER_URL', ''),
         'https://server-local.onrender.com',
         'https://server-local-ypgs.onrender.com',
@@ -1535,6 +1605,7 @@ def api_client_config():
         'success': True,
         'data': {
             'server_urls': urls,
+            'active_server_url': active_url,
             'config_version': os.environ.get('CLIENT_CONFIG_VERSION', '1')
         }
     })
@@ -2490,6 +2561,20 @@ def admin_clear_all():
     log_admin_action('clear_all', '', {'keep_bots': keep_bots, 'keep_games': keep_games, 'keep_links': keep_links})
     log_event('Admin full temizleme yapti')
     return jsonify({'success': True})
+
+
+@app.route('/admin/server-target', methods=['POST'])
+@limiter.limit("30 per minute")
+def admin_server_target():
+    if not check_admin(request):
+        return jsonify({'success': False, 'error': 'Yetkisiz'}), 401
+    data = request.get_json() or {}
+    active_url = set_active_server_url(data.get('active_server_url'))
+    if not active_url:
+        return jsonify({'success': False, 'error': 'Gecersiz sunucu adresi'}), 400
+    log_admin_action('server_target', '', {'active_server_url': active_url})
+    log_event(f'Aktif sunucu hedefi guncellendi: {active_url}')
+    return jsonify({'success': True, 'active_server_url': active_url})
 
 
 @app.route('/admin/sync-all', methods=['POST'])
