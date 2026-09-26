@@ -138,11 +138,7 @@ async function activeRedirect(request, env, origin) {
   const target = await readState(env, "server_target", {});
   const active = cleanUrl(target?.active_server_url);
   if (!active || active === origin) return null;
-  try {
-    const probe = await fetch(`${active}/api/health`, { signal: AbortSignal.timeout(2500) });
-    if (probe.ok) return json({ success: false, error: "Sunucu gecisi gerekli", active_server_url: active }, 503);
-  } catch {}
-  return null;
+  return json({ success: false, error: "Sunucu gecisi gerekli", active_server_url: active }, 503);
 }
 
 async function authenticate(request, env, origin) {

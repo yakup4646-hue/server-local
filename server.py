@@ -87,7 +87,6 @@ SCREENSHOT_BLOCK_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_WINDOW_SECONDS = 60 * 60
 SCREENSHOT_VIOLATION_THRESHOLD = 3
 screenshot_rate_state = {}
-active_server_health_cache = {'url': '', 'checked_at': 0.0, 'healthy': False}
 cloudflare_d1_table_ready = False
 state_cache = {}
 state_cache_lock = threading.RLock()
@@ -1521,31 +1520,6 @@ def set_active_server_url(value):
     return value
 
 
-def active_server_is_healthy(active_url):
-    active_url = normalize_server_url(active_url)
-    if not active_url:
-        return False
-    now = time.time()
-    if (
-        active_server_health_cache.get('url') == active_url
-        and now - float(active_server_health_cache.get('checked_at') or 0) < 30
-    ):
-        return bool(active_server_health_cache.get('healthy'))
-    healthy = False
-    try:
-        req = urlrequest.Request(active_url + '/api/health', method='GET')
-        with urlrequest.urlopen(req, timeout=3) as resp:
-            healthy = 200 <= int(resp.status) < 300
-    except Exception:
-        healthy = False
-    active_server_health_cache.update({
-        'url': active_url,
-        'checked_at': now,
-        'healthy': healthy
-    })
-    return healthy
-
-
 @app.before_request
 def route_clients_to_active_server():
     if not request.path.startswith('/api/'):
@@ -1554,7 +1528,7 @@ def route_clients_to_active_server():
         return None
     active_url = get_active_server_url()
     current_url = normalize_server_url(request.host_url)
-    if active_url and current_url and active_url != current_url and active_server_is_healthy(active_url):
+    if active_url and current_url and active_url != current_url:
         return jsonify({
             'success': False,
             'error': 'Sunucu gecisi gerekli',
@@ -1592,6 +1566,7 @@ def api_client_config():
         'https://server-local-ypgs.onrender.com',
         'https://server-local-id1o.onrender.com',
         'https://server-local-production.up.railway.app',
+        'https://server-local-cf.sametdemirr87.workers.dev',
     ]
     for item in default_urls + re.split(r'[\s,;]+', raw_urls):
         url = str(item or '').strip().rstrip('/')
