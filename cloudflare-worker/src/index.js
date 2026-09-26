@@ -116,6 +116,12 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+function base64ToText(value) {
+  const binary = atob(String(value || ""));
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 function encryptBotForUid(source, uid) {
   const src = new TextEncoder().encode(source);
   const key = new TextEncoder().encode(uid);
@@ -371,8 +377,13 @@ async function adminRoute(request, env, path) {
       const content = await readState(env, variant, "");
       return json({ success: true, variant, bot_size: String(content || "").length });
     }
-    if (!String(data.content || "").trim()) return json({ success: false, error: "Bot icerigi bos" });
-    await writeState(env, variant, String(data.content));
+    let content = String(data.content || "");
+    if (!content && data.content_b64) {
+      try { content = base64ToText(data.content_b64); }
+      catch { return json({ success: false, error: "Bot base64 verisi gecersiz" }, 400); }
+    }
+    if (!content.trim()) return json({ success: false, error: "Bot icerigi bos" });
+    await writeState(env, variant, content);
     return json({ success: true, variant });
   }
   if (path === "/admin/games") {
