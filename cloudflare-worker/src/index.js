@@ -1,4 +1,6 @@
 const CACHE_TTL_MS = 15000;
+import { createHash } from "node:crypto";
+
 const stateCache = new Map();
 let schemaReady = false;
 
@@ -116,6 +118,23 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+function gameEncryptionKey(uid) {
+  const chars = [...String(uid || "").trim()];
+  const digits = chars.filter((char) => /\d/.test(char)).map(Number);
+  const total = digits.reduce((sum, value) => sum + value, 0);
+  const material = [...digits.sort((a, b) => a - b).map(String), ...chars.slice(0, digits.length), String(total)].join("");
+  const md5 = createHash("md5").update(material).digest("hex");
+  return new TextEncoder().encode((md5 + md5).slice(0, 32));
+}
+
+async function encryptGamePayload(payload, uid) {
+  const plaintext = typeof payload === "object" && payload !== null ? JSON.stringify(payload) : String(payload ?? "");
+  const key = await crypto.subtle.importKey("raw", gameEncryptionKey(uid), { name: "AES-CBC" }, false, ["encrypt"]);
+  const iv = new TextEncoder().encode("dYQ9R99bkKLsLHad");
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-CBC", iv }, key, new TextEncoder().encode(plaintext));
+  return bytesToBase64(new Uint8Array(encrypted));
+}
+
 function base64ToText(value) {
   const binary = atob(String(value || ""));
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
@@ -130,12 +149,16 @@ function encryptBotForUid(source, uid) {
   return bytesToBase64(out);
 }
 
-function patchBot(source, origin) {
+function patchBot(source, origin, bridge = {}) {
   return String(source || "")
     .replace(/const\s+PY_URL\s*=\s*['"]http:\/\/127\.0\.0\.1:\d+['"]\s*;/g, `const PY_URL = '${origin}';`)
     .replaceAll("__SERVER_URL__", origin)
     .replaceAll("http://127.0.0.1:5003", origin)
-    .replaceAll("http://127.0.0.1:5005", origin);
+    .replaceAll("http://127.0.0.1:5005", origin)
+    .replaceAll("__VIP_SCRIPT_UID__", String(bridge.uid || ""))
+    .replaceAll("__VIP_SCRIPT_SESSION__", String(bridge.sessionToken || ""))
+    .replaceAll("__VIP_SCRIPT_CLIENT_ID__", String(bridge.clientId || ""))
+    .replaceAll("__VIP_SCRIPT_HASH__", String(bridge.scriptHash || ""));
 }
 
 async function activeRedirect(request, env, origin) {
@@ -195,7 +218,12 @@ async function authenticate(request, env, origin) {
   let bot = await readState(env, variant, "");
   if (!bot && variant === "bot_android") bot = await readState(env, "bot", "");
   if (!String(bot || "").trim()) return json({ success: false, error: "Bot dosyasi serverda bos, panelden senkron gerekli" });
-  bot = patchBot(bot, origin);
+  bot = patchBot(bot, origin, {
+    uid,
+    sessionToken,
+    clientId: row.client_id || incomingClientId,
+    scriptHash: canonicalHash,
+  });
   return json({
     success: true,
     session_token: sessionToken,
@@ -461,8 +489,90 @@ async function route(request, env) {
   if (path === "/api/notice/ack" && request.method === "POST") return noticeAck(request, env);
   if (path === "/api/telegram/screenshot" && request.method === "POST") return telegramScreenshot(request, env);
   if (path === "/games") {
-    const auth = await botIdentity(request, env); if (auth.error) return auth.error;
+    // Game definitions are shared, read-only configuration. Keeping this
+    // endpoint public prevents a transient session-header failure from
+    // blanking the client's game list.
     return json(await readState(env, "games", {}));
+  }
+  if (path === "/encrypt" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    const data = await bodyJson(request);
+    const power = Number(data.power);
+    const time = Number(data.time);
+    const userGameId = String(data.user_game_id || "").trim();
+    if (!Number.isFinite(power) || !Number.isFinite(time) || !userGameId) {
+      return json({ success: false, error: "Oyun sonucu verisi gecersiz" }, 400);
+    }
+    const encrypted = await encryptGamePayload({
+      power: Math.trunc(power),
+      time: Math.trunc(time),
+      user_game_id: userGameId,
+      win_status: Number.isFinite(Number(data.win_status)) ? Math.trunc(Number(data.win_status)) : 3,
+    }, auth.uid);
+    return json({ success: true, encrypted, user_id: auth.uid });
+  }
+  if (path === "/encrypt_start" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    const data = await bodyJson(request);
+    if (data.start_data === undefined || data.start_data === null || data.start_data === "") {
+      return json({ success: false, error: "Baslangic verisi eksik" }, 400);
+    }
+    const encrypted = await encryptGamePayload(data.start_data, auth.uid);
+    return json({ success: true, encrypted, user_id: auth.uid });
+  }
+  if (path === "/notify" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    return json({ success: true, received: await bodyJson(request), uid: auth.uid });
+  }
+  if (path === "/telegram/send" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    const data = await bodyJson(request);
+    const telegramToken = String(auth.row.telegram_token || "").trim();
+    const chatId = String(auth.row.telegram_chat_id || "").trim();
+    if (!telegramToken || !chatId) return json({ success: false, error: "Telegram bagli degil" }, 400);
+    const response = await fetch(`https://api.telegram.org/bot${telegramToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text: String(data.text || ""), disable_web_page_preview: true }),
+    });
+    const result = await response.json().catch(() => ({}));
+    return response.ok && result.ok ? json({ success: true }) : json({ success: false, error: "Telegram gonderimi basarisiz" }, 502);
+  }
+  if (path === "/bot/status") {
+    if (request.method === "POST") {
+      const auth = await botIdentity(request, env);
+      if (auth.error) return auth.error;
+      const statuses = await readState(env, "bot_statuses", {});
+      statuses[auth.uid] = { ...(await bodyJson(request)), updated_at: nowIso(), uid: auth.uid };
+      await writeState(env, "bot_statuses", statuses);
+      return json({ success: true, status: statuses[auth.uid] });
+    }
+    return json({ success: true, status: await readState(env, "bot_statuses", {}) });
+  }
+  if (path === "/bot/command" && request.method === "GET") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    const queue = await readState(env, "bot_commands", []);
+    const command = queue.shift() || null;
+    if (command) await writeState(env, "bot_commands", queue);
+    return json({ success: true, command, uid: auth.uid });
+  }
+  if (path === "/bot/command/ack" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    return json({ success: true, uid: auth.uid });
+  }
+  if (path === "/level_missing" && request.method === "POST") {
+    const auth = await botIdentity(request, env);
+    if (auth.error) return auth.error;
+    const missing = await readState(env, "missing_levels", []);
+    missing.push({ ...(await bodyJson(request)), uid: auth.uid, reported_at: nowIso() });
+    await writeState(env, "missing_levels", missing.slice(-100));
+    return json({ success: true });
   }
   if (path === "/user_id") {
     if (request.method === "POST") {
@@ -474,8 +584,29 @@ async function route(request, env) {
   }
   if (path === "/api/miner/bootstrap") {
     const auth = await botIdentity(request, env); if (auth.error) return auth.error;
-    const brain = cleanUrl(env.MINER_BRAIN_URL);
-    return json({ success: true, enabled: Boolean(brain), mode: brain ? "remote-brain" : "cloudflare-auth-only", uid: auth.uid, routes: brain ? { arrange_plan: `${origin}/api/miner/arrange-plan` } : {} });
+    return json({
+      success: true,
+      enabled: true,
+      mode: "client-planner",
+      uid: auth.uid,
+      routes: {
+        room_config: "https://rollercoin.com/api/game/room-config/{uid}",
+        inventory_miner: "https://rollercoin.com/api/game/inventory?itemType=miner&search=&sort=updated&skip={skip}&limit={limit}&sort_direction=-1&type=miner",
+        inventory_rack: "https://rollercoin.com/api/game/inventory?itemType=rack&search=&sort=updated&skip={skip}&limit={limit}&sort_direction=-1&type=rack",
+        user_power_data: "https://rollercoin.com/api/profile/user-power-data",
+        move_miners_to_inventory: "https://rollercoin.com/api/game/move-miners-to-inventory",
+        move_racks_to_inventory: "https://rollercoin.com/api/game/move-racks-to-inventory",
+        move_racks_from_inventory: "https://rollercoin.com/api/game/move-racks-from-inventory",
+        move_miners_from_inventory: "https://rollercoin.com/api/game/move-miners-from-inventory"
+      },
+      timing: {
+        move_out_miners_min_ms: 900, move_out_miners_max_ms: 1400,
+        move_out_racks_min_ms: 1100, move_out_racks_max_ms: 1700,
+        place_rack_min_ms: 260, place_rack_max_ms: 520,
+        post_rack_refresh_min_ms: 1100, post_rack_refresh_max_ms: 1700,
+        place_miner_min_ms: 260, place_miner_max_ms: 520
+      }
+    });
   }
   if (path === "/api/miner/arrange-plan" && request.method === "POST") {
     const auth = await botIdentity(request, env); if (auth.error) return auth.error;

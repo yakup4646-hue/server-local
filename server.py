@@ -1565,7 +1565,7 @@ def api_client_config():
         'https://server-local.onrender.com',
         'https://server-local-ypgs.onrender.com',
         'https://server-local-id1o.onrender.com',
-        'https://server-local-production.up.railway.app',
+        'https://server-local-production-f351.up.railway.app',
         'https://server-local-cf.sametdemirr87.workers.dev',
     ]
     for item in default_urls + re.split(r'[\s,;]+', raw_urls):
@@ -1587,7 +1587,7 @@ def api_client_config():
 
 
 @app.route('/api/auth', methods=['POST'])
-@limiter.limit("10 per minute")
+@limiter.limit("60 per minute")
 def api_auth():
     data = request.get_json() or {}
     uid = str(data.get('uid') or '').strip().lower()
