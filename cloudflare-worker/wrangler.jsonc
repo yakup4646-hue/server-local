@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "server-local-cf",
+  "name": "server-local",
   "main": "src/index.js",
   "compatibility_date": "2026-09-25",
   "compatibility_flags": ["nodejs_compat"],
@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "server-local-db",
-      "database_id": "3fea3eb0-ef27-470a-ae0a-2a2c09122c47"
+      "database_id": "5e1ba216-63c6-4328-ad71-124a5ecca55b"
     }
   ],
   "observability": {
