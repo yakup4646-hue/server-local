@@ -5,7 +5,7 @@
   "compatibility_date": "2026-09-25",
   "compatibility_flags": ["nodejs_compat"],
   "vars": {
-    "CLIENT_SERVER_URLS": "https://server-local-cf.sametdemirr87.workers.dev,https://server-local-production-f351.up.railway.app,https://server-local.onrender.com,https://server-local-ypgs.onrender.com,https://server-local-id1o.onrender.com"
+    "CLIENT_SERVER_URLS": "https://server-local.trmnykp46.workers.dev,https://server-local-production-f351.up.railway.app,https://server-local.onrender.com,https://server-local-ypgs.onrender.com,https://server-local-id1o.onrender.com"
   },
   "d1_databases": [
     {
