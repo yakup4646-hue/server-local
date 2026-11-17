@@ -1,17 +1,14 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "server-local",
+  "name": "nexus-rollercoin-scripts",
   "main": "src/index.js",
   "compatibility_date": "2026-09-25",
   "compatibility_flags": ["nodejs_compat"],
-  "vars": {
-    "CLIENT_SERVER_URLS": "https://server-local.feridetoraman03.workers.dev,https://server-local-production-f351.up.railway.app,https://server-local.onrender.com,https://server-local-ypgs.onrender.com,https://server-local-id1o.onrender.com"
-  },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "server-local-db",
-      "database_id": "bccb8549-98fe-46c0-895e-14768fd9244d"
+      "database_name": "nexus-rollercoin-scripts-db",
+      "database_id": "5b8cf65e-0fb8-4c81-86f2-cae39d89e270"
     }
   ],
   "observability": {
